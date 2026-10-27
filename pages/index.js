@@ -1,4 +1,4 @@
-
+import CityAutocomplete from "../components/CityAutocomplete";
 import Head from "next/head";
 import { useState } from "react";
 import { motion } from "motion/react";
@@ -57,10 +57,29 @@ function getLocalDateISO(date = new Date()) {
 }
 
 function shiftISODate(dateString, amount) {
-  if (!dateString) return "";
+  if (
+    typeof dateString !== "string" ||
+    !/^\d{4}-\d{2}-\d{2}$/.test(dateString) ||
+    !Number.isInteger(amount)
+  ) {
+    return "";
+  }
 
   const date = new Date(`${dateString}T00:00:00.000Z`);
+
+  if (Number.isNaN(date.getTime())) {
+    return "";
+  }
+
+  if (date.toISOString().slice(0, 10) !== dateString) {
+    return "";
+  }
+
   date.setUTCDate(date.getUTCDate() + amount);
+
+  if (Number.isNaN(date.getTime())) {
+    return "";
+  }
 
   return date.toISOString().slice(0, 10);
 }
@@ -146,11 +165,9 @@ export default function Home() {
   const [children, setChildren] = useState("");
   const [childrenAges, setChildrenAges] = useState("");
 
-
   // Budget
   const [budget, setBudget] = useState("");
   const [currency, setCurrency] = useState("INR");
-
   const [budgetIncludesIntercity, setBudgetIncludesIntercity] =
     useState(true);
 
@@ -161,7 +178,6 @@ export default function Home() {
   ]);
   const [travelStyle, setTravelStyle] = useState("Balanced");
   const [transport, setTransport] = useState("Any suitable option");
-
   const [additionalRequirements, setAdditionalRequirements] = useState("");
 
   const [notice, setNotice] = useState("");
@@ -180,39 +196,39 @@ export default function Home() {
     setNotice("");
   }
 
-  function handleSubmit(event) {
+  async function handleSubmit(event) {
     event.preventDefault();
     setNotice("");
-  
+
     if (!origin.trim() || !destination.trim()) {
       setNotice("Please enter your starting city and destination.");
       return;
     }
-  
+
     if (!departureDate || !returnDate) {
       setNotice("Please select your departure and return dates.");
       return;
     }
-  
+
     if (departureDate < todayDate) {
       setNotice("Departure date cannot be in the past.");
       return;
     }
-  
+
     if (returnDate <= departureDate) {
       setNotice("Return date must be after your departure date.");
       return;
     }
-  
+
     const nights =
       (Date.parse(`${returnDate}T00:00:00.000Z`) -
         Date.parse(`${departureDate}T00:00:00.000Z`)) /
       86400000;
-  
+
     const durationDays = nights + 1;
     const totalTravellers = Number(travellers);
     const totalBudget = Number(budget);
-  
+
     if (
       !Number.isInteger(totalTravellers) ||
       totalTravellers < 1 ||
@@ -221,7 +237,7 @@ export default function Home() {
       setNotice("Please enter between 1 and 50 travellers.");
       return;
     }
-  
+
     if (
       budget.trim() === "" ||
       !Number.isFinite(totalBudget) ||
@@ -230,22 +246,22 @@ export default function Home() {
       setNotice("Please enter a valid total trip budget.");
       return;
     }
-  
+
     const hasAdults = adults.trim() !== "";
     const hasChildren = children.trim() !== "";
-  
+
     let adultCount = null;
     let childCount = null;
-  
+
     if (hasAdults !== hasChildren) {
       setNotice("Enter both adult and child counts, or leave both blank.");
       return;
     }
-  
+
     if (hasAdults && hasChildren) {
       adultCount = Number(adults);
       childCount = Number(children);
-  
+
       if (
         !Number.isInteger(adultCount) ||
         !Number.isInteger(childCount) ||
@@ -259,18 +275,18 @@ export default function Home() {
         return;
       }
     }
-  
+
     const tripBrief = {
       origin: origin.trim(),
       destination: destination.trim(),
-  
+
       dates: {
         departureDate,
         returnDate,
         nights,
         durationDays,
       },
-  
+
       travellers: {
         total: totalTravellers,
         groupType,
@@ -279,7 +295,7 @@ export default function Home() {
         children: childCount,
         childrenAges: childrenAges.trim(),
       },
-  
+
       budget: {
         amount: totalBudget,
         currency,
@@ -287,29 +303,57 @@ export default function Home() {
         totalGroupBudget: totalBudget,
         includesIntercityTransport: budgetIncludesIntercity,
       },
-  
+
       preferences: {
         interests: selectedInterests,
         travelStyle,
         transport,
         additionalRequirements: additionalRequirements.trim(),
       },
-  
+
       createdAt: new Date().toISOString(),
     };
-  
+
     try {
       sessionStorage.setItem(
         "triply-trip-brief",
         JSON.stringify(tripBrief)
       );
-  
+
+      setNotice("Validating your trip details...");
+
+      const response = await fetch("/api/trips/generate", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(tripBrief),
+      });
+
+      const result = await response.json();
+
+      if (!response.ok) {
+        const detailMessage = Array.isArray(result.details)
+          ? result.details
+              .map((item) => `${item.field}: ${item.message}`)
+              .join(" ")
+          : result.error;
+
+        setNotice(
+          detailMessage || "Unable to validate your trip. Please try again."
+        );
+        return;
+      }
+
       setNotice(
-        `Trip brief saved: ${durationDays} days, ${totalTravellers} travellers, total budget ${currency} ${totalBudget.toLocaleString()}. Live pricing and AI planning are not connected yet.`
+        `Trip details validated successfully! ${durationDays} days, ${totalTravellers} travellers, total budget ${currency} ${totalBudget.toLocaleString()}. AI plan generation is the next step.`
       );
     } catch (error) {
-      console.error("Unable to save trip brief:", error);
-      setNotice("Unable to save your trip details. Please try again.");
+      console.error("Trip submission failed:", error);
+
+      setNotice(
+        "Could not connect to the trip planning server. Please check that the app is running and try again."
+      );
     }
   }
 
@@ -345,6 +389,16 @@ export default function Home() {
             <a href="#start-planning" onClick={() => setMenuOpen(false)}>
               Plan a trip
             </a>
+            <a href="/login" onClick={() => setMenuOpen(false)}>
+              Sign in
+            </a>
+            <a
+              className="mobile-nav-cta"
+              href="/signup"
+              onClick={() => setMenuOpen(false)}
+            >
+              Create account <Icon name="right" size={17} />
+            </a>
             <a
               className="mobile-nav-cta"
               href="#start-planning"
@@ -354,8 +408,8 @@ export default function Home() {
             </a>
           </nav>
 
-          <a className="header-cta" href="#start-planning">
-            Let&apos;s plan <Icon name="arrow" size={16} />
+          <a className="header-cta" href="/signup">
+            Get started <Icon name="arrow" size={16} />
           </a>
 
           <button
@@ -532,10 +586,7 @@ export default function Home() {
           <span>YOUR TRIP</span>
         </div>
 
-        <section
-          className="discover-section section-shell"
-          id="discover"
-        >
+        <section className="discover-section section-shell" id="discover">
           <div className="section-heading">
             <div>
               <div className="eyebrow">
@@ -589,10 +640,7 @@ export default function Home() {
           </div>
         </section>
 
-        <section
-          className="manifesto-section"
-          id="how-it-works"
-        >
+        <section className="manifesto-section" id="how-it-works">
           <div className="manifesto-inner">
             <div className="manifesto-symbol">
               <Icon name="sparkles" size={27} />
@@ -650,10 +698,7 @@ export default function Home() {
           </div>
         </section>
 
-        <section
-          className="planner-section section-shell"
-          id="start-planning"
-        >
+        <section className="planner-section section-shell" id="start-planning">
           <div className="planner-heading">
             <div className="eyebrow">
               <span className="eyebrow-dot" /> YOUR ADVENTURE, YOUR RULES
@@ -666,350 +711,354 @@ export default function Home() {
             </p>
           </div>
 
-
           <form className="planner-card" onSubmit={handleSubmit}>
-  <div className="planner-section-label">
-    <span className="eyebrow-dot" />
-    YOUR DESTINATION & DATES
-  </div>
+            <div className="planner-section-label">
+              <span className="eyebrow-dot" />
+              YOUR DESTINATION & DATES
+            </div>
 
-  <div className="planner-fields">
-    <label className="planner-field">
-      <span className="field-label">
-        <Icon name="pin" size={16} /> STARTING FROM
-      </span>
-      <input
-        type="text"
-        value={origin}
-        onChange={(e) => setOrigin(e.target.value)}
-        placeholder="e.g. Pune, Mumbai"
-        maxLength={120}
-        required
-      />
-    </label>
+            <div className="planner-fields">
+              <CityAutocomplete
+                label="STARTING FROM"
+                icon={<Icon name="pin" size={16} />}
+                value={origin}
+                onChange={(value) => {
+                  setOrigin(value);
+                  setNotice("");
+                }}
+                placeholder="e.g. Pune, Mumbai"
+                maxLength={120}
+                required
+              />
 
-    <label className="planner-field">
-      <span className="field-label">
-        <Icon name="globe" size={16} /> DESTINATION
-      </span>
-      <input
-        type="text"
-        value={destination}
-        onChange={(e) => setDestination(e.target.value)}
-        placeholder="e.g. Goa, Bali, Switzerland"
-        maxLength={160}
-        required
-      />
-    </label>
+              <CityAutocomplete
+                label="DESTINATION"
+                icon={<Icon name="globe" size={16} />}
+                value={destination}
+                onChange={(value) => {
+                  setDestination(value);
+                  setNotice("");
+                }}
+                placeholder="e.g. Goa, Bali, Switzerland"
+                maxLength={160}
+                required
+              />
 
-    <label className="planner-field">
-      <span className="field-label">
-        <Icon name="calendar" size={16} /> DEPARTURE DATE
-      </span>
-      <input
-        type="date"
-        min={todayDate}
-        value={departureDate}
-        onChange={(e) => {
-          const value = e.target.value;
-          setDepartureDate(value);
-          if (returnDate && returnDate <= value) setReturnDate("");
-          setNotice("");
-        }}
-        required
-      />
-    </label>
+              <label className="planner-field">
+                <span className="field-label">
+                  <Icon name="calendar" size={16} /> DEPARTURE DATE
+                </span>
+                <input
+                  type="date"
+                  min={todayDate}
+                  value={departureDate}
+                  onChange={(e) => {
+                    const value = e.target.value;
+                    setDepartureDate(value);
+                    if (returnDate && returnDate <= value) {
+                      setReturnDate("");
+                    }
+                    setNotice("");
+                  }}
+                  required
+                />
+              </label>
 
-    <label className="planner-field">
-      <span className="field-label">
-        <Icon name="calendar" size={16} /> RETURN DATE
-      </span>
-      <input
-        type="date"
-        min={
-          departureDate
-            ? shiftISODate(departureDate, 1)
-            : shiftISODate(todayDate, 1)
-        }
-        value={returnDate}
-        onChange={(e) => {
-          setReturnDate(e.target.value);
-          setNotice("");
-        }}
-        required
-      />
-    </label>
+              <label className="planner-field">
+                <span className="field-label">
+                  <Icon name="calendar" size={16} /> RETURN DATE
+                </span>
+                <input
+                  type="date"
+                  min={
+                    departureDate
+                      ? shiftISODate(departureDate, 1)
+                      : shiftISODate(todayDate, 1)
+                  }
+                  value={returnDate}
+                  onChange={(e) => {
+                    setReturnDate(e.target.value);
+                    setNotice("");
+                  }}
+                  required
+                />
+              </label>
 
-    {departureDate && returnDate && returnDate > departureDate && (
-      <div className="trip-duration-preview planner-field-wide">
-        <Icon name="calendar" size={19} />
-        <span>
-          <strong>
-            {(Date.parse(`${returnDate}T00:00:00Z`) -
-              Date.parse(`${departureDate}T00:00:00Z`)) /
-              86400000 +
-              1}{" "}
-            calendar days
-          </strong>
-          <small>
-            {(Date.parse(`${returnDate}T00:00:00Z`) -
-              Date.parse(`${departureDate}T00:00:00Z`)) /
-              86400000}{" "}
-            nights
-          </small>
-        </span>
-      </div>
-    )}
-  </div>
+              {departureDate &&
+                returnDate &&
+                returnDate > departureDate && (
+                  <div className="trip-duration-preview planner-field-wide">
+                    <Icon name="calendar" size={19} />
+                    <span>
+                      <strong>
+                        {(Date.parse(`${returnDate}T00:00:00Z`) -
+                          Date.parse(`${departureDate}T00:00:00Z`)) /
+                          86400000 +
+                          1}{" "}
+                        calendar days
+                      </strong>
+                      <small>
+                        {(Date.parse(`${returnDate}T00:00:00Z`) -
+                          Date.parse(`${departureDate}T00:00:00Z`)) /
+                          86400000}{" "}
+                        nights
+                      </small>
+                    </span>
+                  </div>
+                )}
+            </div>
 
-  <div className="planner-divider" />
+            <div className="planner-divider" />
 
-  <div className="planner-section-label">
-    <Icon name="users" size={17} /> YOUR TRAVEL GROUP
-  </div>
+            <div className="planner-section-label">
+              <Icon name="users" size={17} /> YOUR TRAVEL GROUP
+            </div>
 
-  <div className="planner-fields">
-    <label className="planner-field">
-      <span className="field-label">NUMBER OF TRAVELLERS</span>
-      <input
-        type="number"
-        min="1"
-        max="50"
-        step="1"
-        value={travellers}
-        onChange={(e) => setTravellers(e.target.value)}
-        placeholder="e.g. 4"
-        required
-      />
-      <span className="field-helper">
-        Total number of people travelling.
-      </span>
-    </label>
+            <div className="planner-fields">
+              <label className="planner-field">
+                <span className="field-label">NUMBER OF TRAVELLERS</span>
+                <input
+                  type="number"
+                  min="1"
+                  max="50"
+                  step="1"
+                  value={travellers}
+                  onChange={(e) => setTravellers(e.target.value)}
+                  placeholder="e.g. 4"
+                  required
+                />
+                <span className="field-helper">
+                  Total number of people travelling.
+                </span>
+              </label>
 
-    <label className="planner-field">
-      <span className="field-label">GROUP TYPE</span>
-      <select
-        value={groupType}
-        onChange={(e) => setGroupType(e.target.value)}
-      >
-        <option value="Solo traveller">Solo traveller</option>
-        <option value="Couple">Couple / partners</option>
-        <option value="Family">Family</option>
-        <option value="Friends">Friends group</option>
-        <option value="Colleagues">Colleagues</option>
-        <option value="Friends and family">Friends &amp; family</option>
-        <option value="Mixed group">Mixed group</option>
-        <option value="Other">Other</option>
-      </select>
-    </label>
+              <label className="planner-field">
+                <span className="field-label">GROUP TYPE</span>
+                <select
+                  value={groupType}
+                  onChange={(e) => setGroupType(e.target.value)}
+                >
+                  <option value="Solo traveller">Solo traveller</option>
+                  <option value="Couple">Couple / partners</option>
+                  <option value="Family">Family</option>
+                  <option value="Friends">Friends group</option>
+                  <option value="Colleagues">Colleagues</option>
+                  <option value="Friends and family">Friends &amp; family</option>
+                  <option value="Mixed group">Mixed group</option>
+                  <option value="Other">Other</option>
+                </select>
+              </label>
 
-    <label className="planner-field planner-field-wide">
-      <span className="field-label">
-        WHO IS TRAVELLING WITH WHOM?
-        <span className="optional-label">OPTIONAL</span>
-      </span>
-      <input
-        type="text"
-        value={groupDetails}
-        onChange={(e) => setGroupDetails(e.target.value)}
-        placeholder="e.g. 2 parents + 2 children, 3 friends + 1 cousin"
-        maxLength={250}
-      />
-      <span className="field-helper">
-        Helps the AI tailor activities and recommendations to your group.
-      </span>
-    </label>
-  </div>
+              <label className="planner-field planner-field-wide">
+                <span className="field-label">
+                  WHO IS TRAVELLING WITH WHOM?
+                  <span className="optional-label">OPTIONAL</span>
+                </span>
+                <input
+                  type="text"
+                  value={groupDetails}
+                  onChange={(e) => setGroupDetails(e.target.value)}
+                  placeholder="e.g. 2 parents + 2 children, 3 friends + 1 cousin"
+                  maxLength={250}
+                />
+                <span className="field-helper">
+                  Helps the AI tailor activities and recommendations to your group.
+                </span>
+              </label>
+            </div>
 
-  <div className="traveller-breakdown">
-    <div className="field-label">
-      ADULTS &amp; CHILDREN
-      <span className="optional-label">OPTIONAL</span>
-    </div>
-    <p className="field-helper">
-      Enter both counts if relevant. Their total must match your travellers.
-    </p>
+            <div className="traveller-breakdown">
+              <div className="field-label">
+                ADULTS &amp; CHILDREN
+                <span className="optional-label">OPTIONAL</span>
+              </div>
+              <p className="field-helper">
+                Enter both counts if relevant. Their total must match your travellers.
+              </p>
 
-    <div className="breakdown-grid">
-      <label className="planner-field">
-        <span className="field-label">NUMBER OF ADULTS</span>
-        <input
-          type="number"
-          min="0"
-          max="50"
-          step="1"
-          value={adults}
-          onChange={(e) => setAdults(e.target.value)}
-          placeholder="e.g. 2"
-        />
-      </label>
+              <div className="breakdown-grid">
+                <label className="planner-field">
+                  <span className="field-label">NUMBER OF ADULTS</span>
+                  <input
+                    type="number"
+                    min="0"
+                    max="50"
+                    step="1"
+                    value={adults}
+                    onChange={(e) => setAdults(e.target.value)}
+                    placeholder="e.g. 2"
+                  />
+                </label>
 
-      <label className="planner-field">
-        <span className="field-label">NUMBER OF CHILDREN</span>
-        <input
-          type="number"
-          min="0"
-          max="50"
-          step="1"
-          value={children}
-          onChange={(e) => setChildren(e.target.value)}
-          placeholder="e.g. 2"
-        />
-      </label>
+                <label className="planner-field">
+                  <span className="field-label">NUMBER OF CHILDREN</span>
+                  <input
+                    type="number"
+                    min="0"
+                    max="50"
+                    step="1"
+                    value={children}
+                    onChange={(e) => setChildren(e.target.value)}
+                    placeholder="e.g. 2"
+                  />
+                </label>
 
-      <label className="planner-field children-ages">
-        <span className="field-label">
-          CHILDREN'S AGES
-          <span className="optional-label">IF APPLICABLE</span>
-        </span>
-        <input
-          type="text"
-          value={childrenAges}
-          onChange={(e) => setChildrenAges(e.target.value)}
-          placeholder="e.g. 5 and 9 years"
-          maxLength={100}
-        />
-      </label>
-    </div>
-  </div>
+                <label className="planner-field children-ages">
+                  <span className="field-label">
+                    CHILDREN&apos;S AGES
+                    <span className="optional-label">IF APPLICABLE</span>
+                  </span>
+                  <input
+                    type="text"
+                    value={childrenAges}
+                    onChange={(e) => setChildrenAges(e.target.value)}
+                    placeholder="e.g. 5 and 9 years"
+                    maxLength={100}
+                  />
+                </label>
+              </div>
+            </div>
 
-  <div className="planner-divider" />
+            <div className="planner-divider" />
 
-  <div className="planner-section-label">
-    <Icon name="sparkles" size={17} /> YOUR TOTAL TRIP BUDGET
-  </div>
+            <div className="planner-section-label">
+              <Icon name="sparkles" size={17} /> YOUR TOTAL TRIP BUDGET
+            </div>
 
-  <div className="planner-fields">
-    <label className="planner-field planner-field-wide budget-field">
-      <span className="field-label">TOTAL BUDGET FOR THE ENTIRE TRIP</span>
-      <div className="budget-input-row">
-        <input
-          type="number"
-          min="0.01"
-          step="any"
-          value={budget}
-          onChange={(e) => setBudget(e.target.value)}
-          placeholder="Enter your total budget"
-          required
-        />
-        <select
-          aria-label="Budget currency"
-          value={currency}
-          onChange={(e) => setCurrency(e.target.value)}
-        >
-          <option value="INR">INR (₹)</option>
-          <option value="USD">USD ($)</option>
-          <option value="EUR">EUR (€)</option>
-          <option value="GBP">GBP (£)</option>
-        </select>
-      </div>
-      <span className="field-helper">
-        One total amount for everyone and the whole trip.
-      </span>
-    </label>
+            <div className="planner-fields">
+              <label className="planner-field planner-field-wide budget-field">
+                <span className="field-label">
+                  TOTAL BUDGET FOR THE ENTIRE TRIP
+                </span>
+                <div className="budget-input-row">
+                  <input
+                    type="number"
+                    min="0.01"
+                    step="any"
+                    value={budget}
+                    onChange={(e) => setBudget(e.target.value)}
+                    placeholder="Enter your total budget"
+                    required
+                  />
+                  <select
+                    aria-label="Budget currency"
+                    value={currency}
+                    onChange={(e) => setCurrency(e.target.value)}
+                  >
+                    <option value="INR">INR (₹)</option>
+                    <option value="USD">USD ($)</option>
+                    <option value="EUR">EUR (€)</option>
+                    <option value="GBP">GBP (£)</option>
+                  </select>
+                </div>
+                <span className="field-helper">
+                  One total amount for everyone and the whole trip.
+                </span>
+              </label>
 
-    <label className="planner-field">
-      <span className="field-label">TRAVEL STYLE</span>
-      <select
-        value={travelStyle}
-        onChange={(e) => setTravelStyle(e.target.value)}
-      >
-        <option value="Budget-friendly">Budget-friendly</option>
-        <option value="Balanced">Balanced cost and comfort</option>
-        <option value="Premium">Premium experiences</option>
-        <option value="Luxury">Luxury</option>
-      </select>
-    </label>
+              <label className="planner-field">
+                <span className="field-label">TRAVEL STYLE</span>
+                <select
+                  value={travelStyle}
+                  onChange={(e) => setTravelStyle(e.target.value)}
+                >
+                  <option value="Budget-friendly">Budget-friendly</option>
+                  <option value="Balanced">Balanced cost and comfort</option>
+                  <option value="Premium">Premium experiences</option>
+                  <option value="Luxury">Luxury</option>
+                </select>
+              </label>
 
-    <label className="planner-field">
-      <span className="field-label">PREFERRED TRANSPORT</span>
-      <select
-        value={transport}
-        onChange={(e) => setTransport(e.target.value)}
-      >
-        <option value="Any suitable option">Suggest the best option</option>
-        <option value="Flight">Flight</option>
-        <option value="Train">Train</option>
-        <option value="Bus">Bus</option>
-        <option value="Car">Car / self-drive</option>
-        <option value="Mixed transport">Combination of transport</option>
-      </select>
-    </label>
-  </div>
+              <label className="planner-field">
+                <span className="field-label">PREFERRED TRANSPORT</span>
+                <select
+                  value={transport}
+                  onChange={(e) => setTransport(e.target.value)}
+                >
+                  <option value="Any suitable option">Suggest the best option</option>
+                  <option value="Flight">Flight</option>
+                  <option value="Train">Train</option>
+                  <option value="Bus">Bus</option>
+                  <option value="Car">Car / self-drive</option>
+                  <option value="Mixed transport">Combination of transport</option>
+                </select>
+              </label>
+            </div>
 
-  <label className="budget-inclusion">
-    <input
-      type="checkbox"
-      checked={budgetIncludesIntercity}
-      onChange={(e) => setBudgetIncludesIntercity(e.target.checked)}
-    />
-    <span>
-      <strong>Include travel to the destination in my budget</strong>
-      <small>
-        Includes flights, train or intercity bus estimates in the trip budget.
-      </small>
-    </span>
-  </label>
+            <label className="budget-inclusion">
+              <input
+                type="checkbox"
+                checked={budgetIncludesIntercity}
+                onChange={(e) => setBudgetIncludesIntercity(e.target.checked)}
+              />
+              <span>
+                <strong>Include travel to the destination in my budget</strong>
+                <small>
+                  Includes flights, train or intercity bus estimates in the trip budget.
+                </small>
+              </span>
+            </label>
 
-  <div className="planner-divider" />
+            <div className="planner-divider" />
 
-  <div className="interest-area">
-    <span className="field-label">
-      WHAT ARE YOU INTERESTED IN?
-      <span className="optional-label">OPTIONAL · SELECT MULTIPLE</span>
-    </span>
+            <div className="interest-area">
+              <span className="field-label">
+                WHAT ARE YOU INTERESTED IN?
+                <span className="optional-label">
+                  OPTIONAL · SELECT MULTIPLE
+                </span>
+              </span>
 
-    <div className="interest-chips">
-      {interests.map((interest) => {
-        const active = selectedInterests.includes(interest);
+              <div className="interest-chips">
+                {interests.map((interest) => {
+                  const active = selectedInterests.includes(interest);
 
-        return (
-          <button
-            className={`interest-chip ${active ? "active" : ""}`}
-            type="button"
-            key={interest}
-            aria-pressed={active}
-            onClick={() => toggleInterest(interest)}
-          >
-            {active && <Icon name="check" size={14} />}
-            {interest}
-          </button>
-        );
-      })}
-    </div>
-  </div>
+                  return (
+                    <button
+                      className={`interest-chip ${active ? "active" : ""}`}
+                      type="button"
+                      key={interest}
+                      aria-pressed={active}
+                      onClick={() => toggleInterest(interest)}
+                    >
+                      {active && <Icon name="check" size={14} />}
+                      {interest}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
 
-  <label className="planner-field planner-field-wide additional-requirements">
-    <span className="field-label">
-      ANYTHING ELSE WE SHOULD KNOW?
-      <span className="optional-label">OPTIONAL</span>
-    </span>
-    <textarea
-      value={additionalRequirements}
-      onChange={(e) => setAdditionalRequirements(e.target.value)}
-      placeholder="Vegetarian food, less hectic schedule, must-visit places, places to avoid..."
-      rows={4}
-      maxLength={1500}
-    />
-  </label>
+            <label className="planner-field planner-field-wide additional-requirements">
+              <span className="field-label">
+                ANYTHING ELSE WE SHOULD KNOW?
+                <span className="optional-label">OPTIONAL</span>
+              </span>
+              <textarea
+                value={additionalRequirements}
+                onChange={(e) => setAdditionalRequirements(e.target.value)}
+                placeholder="Vegetarian food, less hectic schedule, must-visit places, places to avoid..."
+                rows={4}
+                maxLength={1500}
+              />
+            </label>
 
-  <div className="planner-submit-row">
-    <p>
-      <Icon name="sparkles" size={17} />
-      Your people. Your dates. Your kind of trip.
-    </p>
-    <button className="button-primary submit-button" type="submit">
-      Build my trip brief <Icon name="right" size={18} />
-    </button>
-  </div>
+            <div className="planner-submit-row">
+              <p>
+                <Icon name="sparkles" size={17} />
+                Your people. Your dates. Your kind of trip.
+              </p>
+              <button className="button-primary submit-button" type="submit">
+                Build my trip brief <Icon name="right" size={18} />
+              </button>
+            </div>
 
-  {notice && (
-    <p className="planner-notice" role="status">
-      <Icon name="sparkles" size={17} /> {notice}
-    </p>
-  )}
-</form>
-
+            {notice && (
+              <p className="planner-notice" role="status">
+                <Icon name="sparkles" size={17} /> {notice}
+              </p>
+            )}
+          </form>
         </section>
 
         <section className="closing-section">
@@ -1036,7 +1085,9 @@ export default function Home() {
           <a href="#home" className="back-top">
             BACK TO TOP ↑
           </a>
-          <span className="footer-copy">© {new Date().getFullYear()} Triply</span>
+          <span className="footer-copy">
+            © {new Date().getFullYear()} Triply
+          </span>
         </footer>
       </main>
     </>
