@@ -1,3 +1,4 @@
+
 import CityAutocomplete from "../components/CityAutocomplete";
 import Head from "next/head";
 import { useState } from "react";
@@ -84,6 +85,27 @@ function shiftISODate(dateString, amount) {
   return date.toISOString().slice(0, 10);
 }
 
+function formatCurrency(amount, currency = "INR") {
+  const value = Number(amount);
+  const safeValue = Number.isFinite(value) ? value : 0;
+
+  try {
+    return new Intl.NumberFormat("en-IN", {
+      style: "currency",
+      currency,
+      maximumFractionDigits: 0,
+    }).format(safeValue);
+  } catch {
+    return `${currency} ${safeValue.toLocaleString("en-IN")}`;
+  }
+}
+
+function formatCostLabel(value) {
+  return String(value)
+    .replace(/([A-Z])/g, " $1")
+    .replace(/^./, (character) => character.toUpperCase());
+}
+
 function Icon({ name, size = 20, strokeWidth = 1.7 }) {
   const common = {
     width: size,
@@ -140,7 +162,7 @@ function Icon({ name, size = 20, strokeWidth = 1.7 }) {
     globe: (
       <>
         <circle cx="12" cy="12" r="10" />
-        <path d="M2 12h20M12 2a15 15 0 0 1 0 20M12 2a15 15 0 0 0 0 20" />
+        <path d="M2 12h20M12 2a15 15 0 0 1 0 20M12 2a15 15 0 0 0 0-20" />
       </>
     ),
   };
@@ -180,7 +202,11 @@ export default function Home() {
   const [transport, setTransport] = useState("Any suitable option");
   const [additionalRequirements, setAdditionalRequirements] = useState("");
 
+  // AI generation state
   const [notice, setNotice] = useState("");
+  const [isGenerating, setIsGenerating] = useState(false);
+  const [plans, setPlans] = useState([]);
+
   const todayDate = getLocalDateISO();
 
   function toggleInterest(interest) {
@@ -194,11 +220,14 @@ export default function Home() {
   function handleDestinationSelect(place) {
     setDestination(place);
     setNotice("");
+    setPlans([]);
   }
 
   async function handleSubmit(event) {
     event.preventDefault();
     setNotice("");
+
+    if (isGenerating) return;
 
     if (!origin.trim() || !destination.trim()) {
       setNotice("Please enter your starting city and destination.");
@@ -314,13 +343,16 @@ export default function Home() {
       createdAt: new Date().toISOString(),
     };
 
+    setIsGenerating(true);
+    setPlans([]);
+
     try {
       sessionStorage.setItem(
         "triply-trip-brief",
         JSON.stringify(tripBrief)
       );
 
-      setNotice("Validating your trip details...");
+      setNotice("Triply is creating your three travel plans...");
 
       const response = await fetch("/api/trips/generate", {
         method: "POST",
@@ -330,23 +362,42 @@ export default function Home() {
         body: JSON.stringify(tripBrief),
       });
 
-      const result = await response.json();
+      const result = await response.json().catch(() => null);
 
-      if (!response.ok) {
-        const detailMessage = Array.isArray(result.details)
+      if (!response.ok || !result?.success) {
+        const detailMessage = Array.isArray(result?.details)
           ? result.details
               .map((item) => `${item.field}: ${item.message}`)
               .join(" ")
-          : result.error;
+          : result?.error;
 
         setNotice(
-          detailMessage || "Unable to validate your trip. Please try again."
+          detailMessage ||
+            "Triply could not generate your plans. Please try again."
         );
         return;
       }
 
+      if (!Array.isArray(result.plans) || result.plans.length === 0) {
+        setNotice(
+          "The server responded, but no travel plans were returned. Please try again."
+        );
+        return;
+      }
+
+      setPlans(result.plans);
+
+      try {
+        sessionStorage.setItem(
+          "triply-trip-plans",
+          JSON.stringify(result.plans)
+        );
+      } catch (storageError) {
+        console.warn("Could not save plans in session storage:", storageError);
+      }
+
       setNotice(
-        `Trip details validated successfully! ${durationDays} days, ${totalTravellers} travellers, total budget ${currency} ${totalBudget.toLocaleString()}. AI plan generation is the next step.`
+        `Triply generated ${result.plans.length} travel plans for ${origin.trim()} to ${destination.trim()}. Estimated costs are for the entire group.`
       );
     } catch (error) {
       console.error("Trip submission failed:", error);
@@ -354,6 +405,8 @@ export default function Home() {
       setNotice(
         "Could not connect to the trip planning server. Please check that the app is running and try again."
       );
+    } finally {
+      setIsGenerating(false);
     }
   }
 
@@ -1048,8 +1101,25 @@ export default function Home() {
                 <Icon name="sparkles" size={17} />
                 Your people. Your dates. Your kind of trip.
               </p>
-              <button className="button-primary submit-button" type="submit">
-                Build my trip brief <Icon name="right" size={18} />
+
+              <button
+                className="button-primary submit-button"
+                type="submit"
+                disabled={isGenerating}
+                aria-busy={isGenerating}
+              >
+                {isGenerating ? (
+                  <>
+                    Generating plans...
+                    <span className="triply-loading-dot" aria-hidden="true">
+                      ···
+                    </span>
+                  </>
+                ) : (
+                  <>
+                    Generate my trip plans <Icon name="right" size={18} />
+                  </>
+                )}
               </button>
             </div>
 
@@ -1060,6 +1130,484 @@ export default function Home() {
             )}
           </form>
         </section>
+
+        {/* AI-generated trip plan results */}
+        {plans.length > 0 && (
+          <section
+            id="trip-results"
+            className="section-shell generated-plans-section"
+            aria-live="polite"
+            style={{ paddingTop: "3rem", paddingBottom: "5rem" }}
+          >
+            <div className="section-heading" style={{ marginBottom: "2rem" }}>
+              <div>
+                <div className="eyebrow">
+                  <span className="eyebrow-dot" /> MADE AROUND YOUR TRIP
+                </div>
+                <h2>
+                  Three ways to <span className="serif-accent">get away.</span>
+                </h2>
+                <p>
+                  Compare the estimates and itinerary details, then choose the
+                  experience that fits your group.
+                </p>
+              </div>
+            </div>
+
+            <div
+              className="generated-plans-grid"
+              style={{
+                display: "grid",
+                gridTemplateColumns:
+                  "repeat(auto-fit, minmax(min(100%, 300px), 1fr))",
+                gap: "1.25rem",
+                alignItems: "start",
+              }}
+            >
+              {plans.map((plan, index) => {
+                const planCurrency = plan.estimatedCost?.currency || currency;
+                const breakdown = plan.estimatedCost?.breakdown || {};
+                const planTotal = Number(plan.estimatedCost?.total ?? 0);
+
+                const perPerson = Number(
+                  plan.estimatedCost?.perPerson ??
+                    planTotal / Math.max(Number(travellers), 1)
+                );
+
+                const budgetStatus =
+                  plan.budgetFit ||
+                  (planTotal > Number(budget)
+                    ? "over-budget"
+                    : planTotal >= Number(budget) * 0.9
+                      ? "near-budget"
+                      : "within-budget");
+
+                const statusText = {
+                  "within-budget": "Within budget",
+                  "near-budget": "Close to budget limit",
+                  "over-budget": "Over your budget",
+                }[budgetStatus] || "Estimated cost";
+
+                return (
+                  <motion.article
+                    className="generated-plan-card"
+                    key={plan.id || plan.name || index}
+                    initial={{ opacity: 0, y: 18 }}
+                    whileInView={{ opacity: 1, y: 0 }}
+                    viewport={{ once: true, amount: 0.1 }}
+                    transition={{ duration: 0.45, delay: index * 0.08 }}
+                    style={{
+                      border: "1px solid rgba(38, 53, 44, 0.14)",
+                      borderRadius: "22px",
+                      padding: "1.4rem",
+                      background: "#fff",
+                      boxShadow: "0 12px 34px rgba(28, 41, 33, 0.06)",
+                      minWidth: 0,
+                    }}
+                  >
+                    <div
+                      style={{
+                        display: "flex",
+                        justifyContent: "space-between",
+                        alignItems: "center",
+                        gap: "0.75rem",
+                        marginBottom: "1rem",
+                      }}
+                    >
+                      <span
+                        style={{
+                          display: "inline-flex",
+                          alignItems: "center",
+                          gap: "0.4rem",
+                          fontSize: "0.72rem",
+                          letterSpacing: "0.08em",
+                          fontWeight: 700,
+                          textTransform: "uppercase",
+                          color: "#49634f",
+                        }}
+                      >
+                        <Icon name="sparkles" size={15} />
+                        OPTION {String(index + 1).padStart(2, "0")}
+                      </span>
+
+                      <span
+                        style={{
+                          fontSize: "0.72rem",
+                          fontWeight: 650,
+                          padding: "0.35rem 0.55rem",
+                          borderRadius: "999px",
+                          color:
+                            budgetStatus === "over-budget"
+                              ? "#983d2f"
+                              : "#365b40",
+                          background:
+                            budgetStatus === "over-budget"
+                              ? "#fff0ec"
+                              : "#edf5eb",
+                          textAlign: "center",
+                        }}
+                      >
+                        {statusText}
+                      </span>
+                    </div>
+
+                    <h3
+                      style={{
+                        fontSize: "1.45rem",
+                        lineHeight: 1.2,
+                        margin: "0 0 0.45rem",
+                      }}
+                    >
+                      {plan.name || "Your travel plan"}
+                    </h3>
+
+                    {plan.tagline && (
+                      <p
+                        style={{
+                          margin: "0 0 0.8rem",
+                          fontWeight: 600,
+                          color: "#617466",
+                        }}
+                      >
+                        {plan.tagline}
+                      </p>
+                    )}
+
+                    <p
+                      style={{
+                        margin: "0 0 1.2rem",
+                        lineHeight: 1.65,
+                        color: "#5c665f",
+                      }}
+                    >
+                      {plan.summary ||
+                        "A travel plan tailored to your trip details."}
+                    </p>
+
+                    <div
+                      style={{
+                        padding: "1rem",
+                        borderRadius: "15px",
+                        background: "#f5f6ef",
+                        marginBottom: "1.25rem",
+                      }}
+                    >
+                      <span
+                        style={{
+                          display: "block",
+                          fontSize: "0.72rem",
+                          letterSpacing: "0.07em",
+                          fontWeight: 700,
+                          color: "#687367",
+                        }}
+                      >
+                        ESTIMATED TOTAL FOR GROUP
+                      </span>
+
+                      <strong
+                        style={{
+                          display: "block",
+                          fontSize: "1.8rem",
+                          lineHeight: 1.3,
+                          marginTop: "0.25rem",
+                          color: "#263d2d",
+                        }}
+                      >
+                        {formatCurrency(planTotal, planCurrency)}
+                      </strong>
+
+                      <span
+                        style={{
+                          display: "block",
+                          fontSize: "0.88rem",
+                          color: "#657066",
+                          marginTop: "0.2rem",
+                        }}
+                      >
+                        {formatCurrency(perPerson, planCurrency)} per person ·{" "}
+                        {plan.days?.length || 0} days
+                      </span>
+                    </div>
+
+                    {plan.highlights?.length > 0 && (
+                      <div style={{ marginBottom: "1.2rem" }}>
+                        <h4
+                          style={{
+                            margin: "0 0 0.65rem",
+                            fontSize: "0.9rem",
+                          }}
+                        >
+                          Highlights
+                        </h4>
+
+                        <ul
+                          style={{
+                            listStyle: "none",
+                            padding: 0,
+                            margin: 0,
+                            display: "grid",
+                            gap: "0.55rem",
+                          }}
+                        >
+                          {plan.highlights.map((highlight, highlightIndex) => (
+                            <li
+                              key={`${plan.id}-highlight-${highlightIndex}`}
+                              style={{
+                                display: "flex",
+                                gap: "0.55rem",
+                                lineHeight: 1.5,
+                                color: "#505c53",
+                                fontSize: "0.92rem",
+                              }}
+                            >
+                              <span
+                                style={{
+                                  color: "#5b7d5f",
+                                  flexShrink: 0,
+                                }}
+                              >
+                                <Icon name="check" size={16} />
+                              </span>
+                              <span>{highlight}</span>
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+
+                    {plan.bestFor && (
+                      <p
+                        style={{
+                          margin: "0 0 0.75rem",
+                          lineHeight: 1.55,
+                          fontSize: "0.9rem",
+                        }}
+                      >
+                        <strong>Best for:</strong> {plan.bestFor}
+                      </p>
+                    )}
+
+                    {plan.staySuggestion && (
+                      <p
+                        style={{
+                          margin: "0 0 0.75rem",
+                          lineHeight: 1.55,
+                          fontSize: "0.9rem",
+                        }}
+                      >
+                        <strong>Stay:</strong> {plan.staySuggestion}
+                      </p>
+                    )}
+
+                    {plan.transportPlan && (
+                      <p
+                        style={{
+                          margin: "0 0 1.1rem",
+                          lineHeight: 1.55,
+                          fontSize: "0.9rem",
+                        }}
+                      >
+                        <strong>Transport:</strong> {plan.transportPlan}
+                      </p>
+                    )}
+
+                    <details
+                      style={{
+                        borderTop: "1px solid #e6e9e2",
+                        paddingTop: "1rem",
+                      }}
+                    >
+                      <summary
+                        style={{
+                          cursor: "pointer",
+                          fontWeight: 700,
+                          color: "#314c39",
+                          lineHeight: 1.5,
+                        }}
+                      >
+                        View itinerary and cost breakdown
+                      </summary>
+
+                      <div style={{ paddingTop: "1rem" }}>
+                        <h4
+                          style={{
+                            margin: "0 0 0.75rem",
+                            fontSize: "0.95rem",
+                          }}
+                        >
+                          Estimated cost breakdown
+                        </h4>
+
+                        <div
+                          style={{
+                            display: "grid",
+                            gap: "0.55rem",
+                            marginBottom: "1.5rem",
+                          }}
+                        >
+                          {Object.entries(breakdown).map(([key, value]) => (
+                            <div
+                              key={key}
+                              style={{
+                                display: "flex",
+                                justifyContent: "space-between",
+                                gap: "0.8rem",
+                                fontSize: "0.88rem",
+                                color: "#58645b",
+                              }}
+                            >
+                              <span>{formatCostLabel(key)}</span>
+                              <strong
+                                style={{
+                                  color: "#283d2e",
+                                  whiteSpace: "nowrap",
+                                }}
+                              >
+                                {formatCurrency(value, planCurrency)}
+                              </strong>
+                            </div>
+                          ))}
+
+                          <div
+                            style={{
+                              display: "flex",
+                              justifyContent: "space-between",
+                              gap: "0.8rem",
+                              paddingTop: "0.6rem",
+                              borderTop: "1px solid #e6e9e2",
+                            }}
+                          >
+                            <strong>Total</strong>
+                            <strong>
+                              {formatCurrency(planTotal, planCurrency)}
+                            </strong>
+                          </div>
+                        </div>
+
+                        <h4
+                          style={{
+                            margin: "0 0 0.75rem",
+                            fontSize: "0.95rem",
+                          }}
+                        >
+                          Day-by-day itinerary
+                        </h4>
+
+                        {Array.isArray(plan.days) && plan.days.length > 0 ? (
+                          <div style={{ display: "grid", gap: "1rem" }}>
+                            {plan.days.map((day, dayIndex) => (
+                              <article
+                                key={`${plan.id}-day-${day.day || dayIndex}`}
+                                style={{
+                                  borderLeft: "2px solid #c7d6c5",
+                                  paddingLeft: "0.85rem",
+                                }}
+                              >
+                                <span
+                                  style={{
+                                    display: "block",
+                                    color: "#637667",
+                                    fontSize: "0.72rem",
+                                    fontWeight: 750,
+                                    letterSpacing: "0.06em",
+                                    textTransform: "uppercase",
+                                  }}
+                                >
+                                  Day {day.day || dayIndex + 1}
+                                </span>
+
+                                <h5
+                                  style={{
+                                    margin: "0.25rem 0 0.65rem",
+                                    fontSize: "1rem",
+                                  }}
+                                >
+                                  {day.title || `Day ${dayIndex + 1}`}
+                                </h5>
+
+                                {[
+                                  ["Morning", day.morning],
+                                  ["Afternoon", day.afternoon],
+                                  ["Evening", day.evening],
+                                ].map(([label, activity]) =>
+                                  activity ? (
+                                    <p
+                                      key={label}
+                                      style={{
+                                        margin: "0 0 0.55rem",
+                                        fontSize: "0.88rem",
+                                        lineHeight: 1.55,
+                                        color: "#58645b",
+                                      }}
+                                    >
+                                      <strong>{label}:</strong> {activity}
+                                    </p>
+                                  ) : null
+                                )}
+
+                                {day.localTip && (
+                                  <p
+                                    style={{
+                                      margin: "0 0 0.5rem",
+                                      fontSize: "0.85rem",
+                                      lineHeight: 1.55,
+                                      color: "#657066",
+                                    }}
+                                  >
+                                    <strong>Local tip:</strong> {day.localTip}
+                                  </p>
+                                )}
+
+                                {Number.isFinite(Number(day.estimatedCost)) && (
+                                  <span
+                                    style={{
+                                      display: "inline-block",
+                                      fontSize: "0.8rem",
+                                      color: "#405d47",
+                                      fontWeight: 650,
+                                    }}
+                                  >
+                                    Estimated day cost:{" "}
+                                    {formatCurrency(
+                                      day.estimatedCost,
+                                      planCurrency
+                                    )}
+                                  </span>
+                                )}
+                              </article>
+                            ))}
+                          </div>
+                        ) : (
+                          <p
+                            style={{
+                              color: "#657066",
+                              fontSize: "0.9rem",
+                            }}
+                          >
+                            No daily itinerary was returned for this plan.
+                          </p>
+                        )}
+                      </div>
+                    </details>
+                  </motion.article>
+                );
+              })}
+            </div>
+
+            <p
+              style={{
+                margin: "1.25rem 0 0",
+                fontSize: "0.82rem",
+                lineHeight: 1.6,
+                color: "#69746b",
+              }}
+            >
+              These are AI-generated estimates, not live quotes or bookings.
+              Confirm transport fares, accommodation prices, opening hours and
+              availability before travelling.
+            </p>
+          </section>
+        )}
 
         <section className="closing-section">
           <span className="closing-sun">✳</span>
