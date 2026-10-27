@@ -1,4 +1,3 @@
-
 import { z } from "zod";
 
 const MODEL = "@cf/zai-org/glm-4.7-flash";
@@ -100,7 +99,7 @@ Create exactly 3 distinct travel plans using the trip details below.
 TRIP DETAILS:
 ${JSON.stringify(trip, null, 2)}
 
-REQUIRED PLANS:
+REQUIRED PLANS, IN THIS EXACT ORDER:
 1. budget-explorer: Budget Explorer — economical accommodation,
    affordable food and cost-conscious activities.
 2. balanced-escape: Balanced Escape — a balanced mix of comfort,
@@ -109,31 +108,24 @@ REQUIRED PLANS:
    memorable experiences while respecting the available budget
    wherever realistically possible.
 
-IMPORTANT RULES:
-- Return a JSON object only. Do not use Markdown or code fences.
+OUTPUT RULES:
+- Return a valid JSON object only. No Markdown or code fences.
 - The JSON object must contain exactly one property: "plans".
-- "plans" must contain exactly 3 plans in the order specified above.
-- Follow the exact output structure provided below.
+- Return exactly 3 complete plans in the specified order.
+- Every plan must contain every field in the JSON structure below.
 - Each plan must contain exactly ${trip.dates.durationDays} day entries.
-- Day numbers must start at 1 and end at ${trip.dates.durationDays}.
-- Use ${trip.budget.currency} for every cost.
-- The total budget for the entire group is ${trip.budget.totalGroupBudget}.
-- Make estimated costs realistic and internally consistent. The sum of
-  the cost breakdown must equal estimatedCost.total.
-- Per-person cost must equal total cost divided by ${trip.travellers.total}.
-- If includesIntercityTransport is false, set intercityTransport to 0
-  in the cost breakdown and do not include that expense in the total.
-- Try to keep each plan within the total group budget. Never hide
-  an over-budget estimate; the application will identify it.
-- Do not claim that hotel rooms, tickets, or transport are booked.
-- Do not invent live availability, exact live fares, or confirmed prices.
-  All costs are estimates.
-- Suggest plausible places, activities and transport options. Do not
-  invent attractions. When uncertain, keep recommendations general.
-- Each day must have useful morning, afternoon and evening activities.
-- Keep the plans meaningfully different, not just differently named.
-- chatbotContext should summarize the complete plan and its important
-  assumptions so a separate AI chatbot can answer questions about it.
+- Day numbers must be consecutive, starting at 1 and ending at ${trip.dates.durationDays}.
+- All costs must be non-negative numbers in ${trip.budget.currency}.
+- The total group budget is ${trip.budget.totalGroupBudget}.
+- The sum of all six breakdown values must equal estimatedCost.total.
+- estimatedCost.perPerson must equal total divided by ${trip.travellers.total}.
+- If includesIntercityTransport is false, intercityTransport must be 0.
+- Keep costs realistic. Do not claim anything is booked or confirmed.
+- Do not invent live availability, exact live fares or confirmed prices.
+- Give useful morning, afternoon and evening activities for every day.
+- Make all three plans meaningfully different.
+- Every highlight, description, suggestion and chatbotContext must be a non-empty string.
+- Finish all three plans. Never omit fields from the third plan.
 
 REQUIRED JSON STRUCTURE:
 {
@@ -161,8 +153,8 @@ REQUIRED JSON STRUCTURE:
         "Highlight two",
         "Highlight three"
       ],
-      "staySuggestion": "Type of accommodation and suggested area",
-      "transportPlan": "Suggested transport approach",
+      "staySuggestion": "Accommodation suggestion",
+      "transportPlan": "Transport suggestion",
       "bestFor": "Who this plan suits",
       "days": [
         {
@@ -175,56 +167,52 @@ REQUIRED JSON STRUCTURE:
           "localTip": "Practical tip"
         }
       ],
-      "chatbotContext": "Detailed context for the plan-specific chatbot"
+      "chatbotContext": "Complete context for the plan-specific chatbot"
     }
   ]
 }
 
-Return the actual plan data, not the example values. Ensure all numeric
-costs are non-negative numbers, and the breakdown total is consistent.
+The example is only a template. Return actual plans based on the trip details.
+Ensure the breakdown is consistent and all required fields are populated.
 `;
 }
 
-
 function extractModelText(data) {
-    const result = data?.result;
-  
-    // Log response structure only; do not log credentials.
-    console.log("Cloudflare result keys:", Object.keys(result ?? {}));
-  
-    const candidates = [
-      result?.response,
-      result?.output_text,
-      result?.choices?.[0]?.message?.content,
-      result?.choices?.[0]?.text,
-      result?.content,
-    ];
-  
-    const text = candidates.find(
-      (value) => typeof value === "string" && value.trim().length > 0
-    );
-  
-    if (text) {
-      return text;
-    }
-  
-    console.error(
-      "Cloudflare returned no usable text. Result preview:",
-      JSON.stringify(result ?? null).slice(0, 1500)
-    );
-  
-    return null;
+  const result = data?.result;
+
+  console.log("Cloudflare result keys:", Object.keys(result ?? {}));
+
+  const candidates = [
+    result?.response,
+    result?.output_text,
+    result?.choices?.[0]?.message?.content,
+    result?.choices?.[0]?.text,
+    result?.content,
+  ];
+
+  const text = candidates.find(
+    (value) => typeof value === "string" && value.trim().length > 0
+  );
+
+  if (text) {
+    return text;
   }
-  
+
+  console.error(
+    "Cloudflare returned no usable text. Result preview:",
+    JSON.stringify(result ?? null).slice(0, 1500)
+  );
+
+  throw new Error("The AI model returned an empty response.");
+}
 
 function parseModelJSON(text) {
-  if (!text) {
+  if (!text || typeof text !== "string") {
     throw new Error("The AI model returned an empty response.");
   }
 
-  let cleaned = text.trim();
-
-  cleaned = cleaned
+  const cleaned = text
+    .trim()
     .replace(/^```(?:json)?\s*/i, "")
     .replace(/\s*```$/, "");
 
@@ -238,160 +226,205 @@ function parseModelJSON(text) {
       throw new Error("The AI model did not return valid JSON.");
     }
 
-    return JSON.parse(cleaned.slice(firstBrace, lastBrace + 1));
+    try {
+      return JSON.parse(cleaned.slice(firstBrace, lastBrace + 1));
+    } catch {
+      throw new Error("The AI model did not return valid JSON.");
+    }
   }
 }
 
-
 async function generateTripPlans(trip) {
-    const accountId = process.env.CLOUDFLARE_ACCOUNT_ID;
-    const apiToken = process.env.CLOUDFLARE_API_TOKEN;
-  
-    if (!accountId || !apiToken) {
-      throw new Error("Cloudflare AI credentials are not configured.");
-    }
-  
-    const endpoint =
-      `https://api.cloudflare.com/client/v4/accounts/` +
-      `${accountId}/ai/run/@cf/zai-org/glm-4.7-flash`;
-  
-    // Keep output proportional to trip length.
-    // Disable the model's extra reasoning to reduce response latency.
-    const maxTokens = Math.min(
-      6000,
-      Math.max(3000, trip.dates.durationDays * 650)
-    );
-  
-    console.log(
-      `Generating Triply plans: ${trip.dates.durationDays} days, ` +
-      `${trip.travellers.total} travellers, max tokens ${maxTokens}`
-    );
-  
-    const response = await fetch(endpoint, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${apiToken}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        messages: [
-          {
-            role: "system",
-            content:
-              "You are Triply, a travel-planning assistant. " +
-              "Generate concise, realistic travel itineraries. " +
-              "Return valid JSON only, without Markdown or explanations. " +
-              "Do not reveal or perform extended reasoning. " +
-              "All costs are estimates, never confirmed live prices. " +
-              "Follow every requested plan ID and output field exactly.",
-          },
-          {
-            role: "user",
-            content: buildPrompt(trip),
-          },
-        ],
-        response_format: {
-          type: "json_object",
+  const accountId = process.env.CLOUDFLARE_ACCOUNT_ID;
+  const apiToken = process.env.CLOUDFLARE_API_TOKEN;
+
+  if (!accountId || !apiToken) {
+    throw new Error("Cloudflare AI credentials are not configured.");
+  }
+
+  const endpoint =
+    `https://api.cloudflare.com/client/v4/accounts/` +
+    `${accountId}/ai/run/${MODEL}`;
+
+  const maxTokens = Math.min(
+    6000,
+    Math.max(4500, trip.dates.durationDays * 900)
+  );
+
+  const requiredIds = [
+    "budget-explorer",
+    "balanced-escape",
+    "premium-experience",
+  ];
+
+  const retryableMessages = [
+    "empty response",
+    "valid json",
+    "incomplete or invalid plan data",
+    "incomplete or incorrectly ordered plans",
+    "invalid itinerary day numbers",
+  ];
+
+  let lastError;
+
+  for (let attempt = 1; attempt <= 2; attempt += 1) {
+    try {
+      console.log(
+        `Generating Triply plans: ${trip.dates.durationDays} days, ` +
+          `${trip.travellers.total} travellers, ` +
+          `attempt ${attempt}/2, max tokens ${maxTokens}`
+      );
+
+      const response = await fetch(endpoint, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${apiToken}`,
+          "Content-Type": "application/json",
         },
-        chat_template_kwargs: {
-          enable_thinking: false,
-        },
-        reasoning_effort: "low",
-        max_tokens: maxTokens,
-        temperature: 0.2,
-      }),
-      signal: AbortSignal.timeout(90000),
-    });
-  
-    const data = await response.json();
-  
-    if (!response.ok || !data.success) {
-      console.error(
-        "Cloudflare AI request failed:",
-        response.status,
-        JSON.stringify(data.errors ?? data, null, 2)
-      );
-  
-      throw new Error(
-        `Cloudflare AI request failed with status ${response.status}.`
-      );
-    }
-  
-    const modelText = extractModelText(data);
-    const parsed = parseModelJSON(modelText);
-  
-    const validated = z
-      .object({
-        plans: z.array(GeneratedPlanSchema).length(3),
-      })
-      .safeParse(parsed);
-  
-    if (!validated.success) {
-      console.error(
-        "Invalid AI plan structure:",
-        JSON.stringify(validated.error.issues, null, 2)
-      );
-  
-      throw new Error("The AI returned plans in an unexpected format.");
-    }
-  
-    const requiredIds = [
-      "budget-explorer",
-      "balanced-escape",
-      "premium-experience",
-    ];
-  
-    const plans = validated.data.plans.map((plan, index) => {
-      if (
-        plan.id !== requiredIds[index] ||
-        plan.days.length !== trip.dates.durationDays
-      ) {
+        body: JSON.stringify({
+          messages: [
+            {
+              role: "system",
+              content:
+                "You are Triply, a travel-planning assistant. " +
+                "Generate exactly three complete travel plans. " +
+                "Return valid JSON only, without Markdown. " +
+                "Follow every requested plan ID and output field exactly. " +
+                "Use realistic cost estimates and never invent confirmed bookings. " +
+                "Complete every field and every itinerary day in all three plans. " +
+                "Do not stop before the third plan is complete.",
+            },
+            {
+              role: "user",
+              content: buildPrompt(trip),
+            },
+          ],
+          response_format: {
+            type: "json_object",
+          },
+          chat_template_kwargs: {
+            enable_thinking: false,
+          },
+          reasoning_effort: "low",
+          max_tokens: maxTokens,
+          temperature: 0.1,
+        }),
+        signal: AbortSignal.timeout(90000),
+      });
+
+      const data = await response.json();
+
+      if (!response.ok || !data.success) {
+        console.error(
+          "Cloudflare AI request failed:",
+          response.status,
+          JSON.stringify(data.errors ?? data, null, 2)
+        );
+
         throw new Error(
-          "The AI returned incomplete or incorrectly ordered plans."
+          `Cloudflare AI request failed with status ${response.status}.`
         );
       }
-  
-      for (let dayIndex = 0; dayIndex < plan.days.length; dayIndex += 1) {
-        if (plan.days[dayIndex].day !== dayIndex + 1) {
-          throw new Error("The AI returned invalid itinerary day numbers.");
+
+      const modelText = extractModelText(data);
+      const parsed = parseModelJSON(modelText);
+
+      const validated = z
+        .object({
+          plans: z.array(GeneratedPlanSchema).length(3),
+        })
+        .safeParse(parsed);
+
+      if (!validated.success) {
+        console.error(
+          `Invalid AI plan structure on attempt ${attempt}:`,
+          JSON.stringify(validated.error.issues, null, 2)
+        );
+
+        throw new Error(
+          "The AI returned incomplete or invalid plan data."
+        );
+      }
+
+      const plans = validated.data.plans.map((plan, index) => {
+        if (
+          plan.id !== requiredIds[index] ||
+          plan.days.length !== trip.dates.durationDays
+        ) {
+          throw new Error(
+            "The AI returned incomplete or incorrectly ordered plans."
+          );
         }
-      }
-  
-      const breakdown = plan.estimatedCost.breakdown;
-  
-      const total = Object.values(breakdown).reduce(
-        (sum, amount) => sum + amount,
-        0
+
+        for (let dayIndex = 0; dayIndex < plan.days.length; dayIndex += 1) {
+          if (plan.days[dayIndex].day !== dayIndex + 1) {
+            throw new Error(
+              "The AI returned invalid itinerary day numbers."
+            );
+          }
+        }
+
+        const breakdown = plan.estimatedCost.breakdown;
+
+        const total = Object.values(breakdown).reduce(
+          (sum, amount) => sum + amount,
+          0
+        );
+
+        const budget = trip.budget.totalGroupBudget;
+
+        let budgetFit = "within-budget";
+
+        if (total > budget) {
+          budgetFit = "over-budget";
+        } else if (total >= budget * 0.9) {
+          budgetFit = "near-budget";
+        }
+
+        return {
+          ...plan,
+          estimatedCost: {
+            total,
+            perPerson:
+              Math.round((total / trip.travellers.total) * 100) / 100,
+            currency: trip.budget.currency,
+            breakdown,
+          },
+          budgetFit,
+        };
+      });
+
+      console.log(
+        `Triply successfully generated three travel plans on attempt ${attempt}.`
       );
-  
-      const budget = trip.budget.totalGroupBudget;
-  
-      let budgetFit = "within-budget";
-  
-      if (total > budget) {
-        budgetFit = "over-budget";
-      } else if (total >= budget * 0.9) {
-        budgetFit = "near-budget";
+
+      return plans;
+    } catch (error) {
+      lastError = error;
+
+      console.error(
+        `Trip generation attempt ${attempt} failed:`,
+        error.message
+      );
+
+      const message = String(error?.message ?? "").toLowerCase();
+
+      const retryable = retryableMessages.some((item) =>
+        message.includes(item)
+      );
+
+      if (!retryable || attempt === 2) {
+        throw error;
       }
-  
-      return {
-        ...plan,
-        estimatedCost: {
-          total,
-          perPerson:
-            Math.round((total / trip.travellers.total) * 100) / 100,
-          currency: trip.budget.currency,
-          breakdown,
-        },
-        budgetFit,
-      };
-    });
-  
-    console.log("Triply successfully generated three travel plans.");
-  
-    return plans;
+
+      console.warn(
+        "Retrying Triply generation because the AI output was invalid."
+      );
+    }
   }
-  
+
+  throw lastError || new Error("Unable to generate travel plans.");
+}
 
 export default async function handler(req, res) {
   if (req.method !== "POST") {
