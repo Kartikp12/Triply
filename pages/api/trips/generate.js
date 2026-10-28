@@ -309,7 +309,7 @@ async function generateTripPlans(trip) {
           max_tokens: maxTokens,
           temperature: 0.1,
         }),
-        signal: AbortSignal.timeout(90000),
+        signal: AbortSignal.timeout(240000),
       });
 
       const data = await response.json();
