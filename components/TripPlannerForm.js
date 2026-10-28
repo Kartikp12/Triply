@@ -80,6 +80,43 @@ function SectionHeading({ number, title, description }) {
 const inputClass =
   "w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-900 outline-none transition placeholder:text-slate-400 focus:border-emerald-500 focus:ring-4 focus:ring-emerald-500/10";
 
+async function requestChunkGeneration(payload) {
+  let response;
+
+  try {
+    response = await fetch("/api/trips/generate-chunk", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(payload),
+    });
+  } catch {
+    throw new Error(
+      "Connection lost while generating your itinerary. Please try again."
+    );
+  }
+
+  let result;
+
+  try {
+    result = await response.json();
+  } catch {
+    throw new Error(
+      "The server returned an invalid response while building your itinerary."
+    );
+  }
+
+  if (!response.ok || result?.success !== true) {
+    throw new Error(
+      result?.error ||
+        `Unable to generate itinerary part (HTTP ${response.status}).`
+    );
+  }
+
+  return result;
+}
+
 export default function TripPlannerForm({ onPlansGenerated }) {
   const today = getLocalDateISO();
   const initialDeparture = shiftISODate(today, 7);
@@ -227,12 +264,8 @@ export default function TripPlannerForm({ onPlansGenerated }) {
       message: "Building your personalised travel plans...",
     });
 
-    const adultCount =
-      adults.trim() === "" ? null : Number(adults);
-
-    const childCount =
-      children.trim() === "" ? null : Number(children);
-
+    const adultCount = adults.trim() === "" ? null : Number(adults);
+    const childCount = children.trim() === "" ? null : Number(children);
     const totalBudget = Number(budget);
 
     const tripBrief = {
@@ -281,69 +314,208 @@ export default function TripPlannerForm({ onPlansGenerated }) {
         );
       }
 
-      const response = await fetch("/api/trips/generate", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify(tripBrief),
-      });
+      let plans = [];
 
-      let result;
+      // Keep the existing, working API for trips of four days or fewer.
+      if (durationDays <= 4) {
+        const response = await fetch("/api/trips/generate", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify(tripBrief),
+        });
 
-      try {
-        result = await response.json();
-      } catch {
-        throw new Error(
-          "The server returned an invalid response. Please try again."
-        );
-      }
+        let result;
 
-      if (!response.ok) {
-        let detailMessage =
-          result?.error || "Unable to generate trip plans.";
-
-        if (
-          Array.isArray(result?.details) &&
-          result.details.length > 0
-        ) {
-          detailMessage = result.details
-            .map((item) =>
-              typeof item === "string"
-                ? item
-                : item.message ||
-                  item.path?.join(".") ||
-                  "Invalid input"
-            )
-            .join(" ");
+        try {
+          result = await response.json();
+        } catch {
+          throw new Error(
+            "The server returned an invalid response. Please try again."
+          );
         }
 
-        throw new Error(detailMessage);
+        if (!response.ok) {
+          let detailMessage =
+            result?.error || "Unable to generate trip plans.";
+
+          if (
+            Array.isArray(result?.details) &&
+            result.details.length > 0
+          ) {
+            detailMessage = result.details
+              .map((item) =>
+                typeof item === "string"
+                  ? item
+                  : item.message ||
+                    item.path?.join(".") ||
+                    "Invalid input"
+              )
+              .join(" ");
+          }
+
+          throw new Error(detailMessage);
+        }
+
+        if (!Array.isArray(result?.plans) || result.plans.length !== 3) {
+          throw new Error(
+            "The server did not return all three travel plans. Please try again."
+          );
+        }
+
+        plans = result.plans;
+      } else {
+        // Larger trips use independent short requests instead of one
+        // oversized AI request that may time out on Vercel.
+        const planIds = [
+          "budget-explorer",
+          "balanced-escape",
+          "premium-experience",
+        ];
+
+        const chunkSize = 4;
+
+        setNotice({
+          type: "loading",
+          message: "Preparing your three travel plan options...",
+        });
+
+        // Generate the overview for each plan.
+        const overviewResults = await Promise.all(
+          planIds.map(async (planId) => {
+            const result = await requestChunkGeneration({
+              mode: "overview",
+              trip: tripBrief,
+              planId,
+            });
+
+            if (!result.plan || result.plan.id !== planId) {
+              throw new Error(
+                `Triply did not return a valid overview for ${planId}.`
+              );
+            }
+
+            return result.plan;
+          })
+        );
+
+        const daysByPlan = Object.fromEntries(
+          planIds.map((planId) => [planId, []])
+        );
+
+        // Generate itinerary chunks of no more than four days.
+        // The three plans' chunks for each date range run in parallel.
+        for (
+          let startDay = 1;
+          startDay <= durationDays;
+          startDay += chunkSize
+        ) {
+          const endDay = Math.min(
+            startDay + chunkSize - 1,
+            durationDays
+          );
+
+          setNotice({
+            type: "loading",
+            message:
+              `Generating itinerary days ${startDay}–${endDay} ` +
+              `of ${durationDays} for all three plans...`,
+          });
+
+          const chunkResults = await Promise.all(
+            overviewResults.map(async (overview) => {
+              const result = await requestChunkGeneration({
+                mode: "days",
+                trip: tripBrief,
+                planId: overview.id,
+                startDay,
+                endDay,
+                overview,
+              });
+
+              if (
+                result.planId !== overview.id ||
+                !Array.isArray(result.days) ||
+                result.days.length !== endDay - startDay + 1
+              ) {
+                throw new Error(
+                  `Triply returned incomplete itinerary days ${startDay}–${endDay}.`
+                );
+              }
+
+              return {
+                planId: overview.id,
+                days: result.days,
+              };
+            })
+          );
+
+          for (const chunk of chunkResults) {
+            daysByPlan[chunk.planId].push(...chunk.days);
+          }
+        }
+
+        // Verify every plan has all days in the correct order before
+        // handing the results over to the existing results UI.
+        plans = overviewResults.map((overview) => {
+          const days = daysByPlan[overview.id].sort(
+            (a, b) => a.day - b.day
+          );
+
+          if (
+            days.length !== durationDays ||
+            days.some((day, index) => day.day !== index + 1)
+          ) {
+            throw new Error(
+              `The ${overview.name} itinerary is incomplete. Please retry.`
+            );
+          }
+
+          const completeItinerary = days
+            .map(
+              (day) =>
+                `Day ${day.day}: ${day.title}. ` +
+                `Morning: ${day.morning}. ` +
+                `Afternoon: ${day.afternoon}. ` +
+                `Evening: ${day.evening}. ` +
+                `Estimated daily cost: ${day.estimatedCost} ${currency}. ` +
+                `Tip: ${day.localTip}`
+            )
+            .join("\n");
+
+          return {
+            ...overview,
+            days,
+            chatbotContext:
+              `${overview.chatbotContext}\n\n` +
+              `Complete ${durationDays}-day itinerary:\n${completeItinerary}`,
+          };
+        });
       }
 
-      if (
-        !Array.isArray(result?.plans) ||
-        result.plans.length === 0
-      ) {
+      if (!Array.isArray(plans) || plans.length !== 3) {
         throw new Error(
-          "No travel plans were returned. Please try again."
+          "No complete set of travel plans was returned. Please try again."
         );
       }
 
       if (typeof window !== "undefined") {
         window.sessionStorage.setItem(
           "triply-trip-plans",
-          JSON.stringify(result.plans)
+          JSON.stringify(plans)
         );
       }
 
       setNotice({
         type: "success",
-        message: `${result.plans.length} personalised travel plans are ready.`,
+        message: `${plans.length} personalised travel plans are ready.`,
       });
 
-      onPlansGenerated?.(result.plans, tripBrief);
+      onPlansGenerated?.(plans, tripBrief);
     } catch (error) {
+      console.error("Trip planner generation failed:", error);
+
       setNotice({
         type: "error",
         message:
@@ -434,13 +606,8 @@ export default function TripPlannerForm({ onPlansGenerated }) {
                     const nextDeparture = event.target.value;
                     setDepartureDate(nextDeparture);
 
-                    if (
-                      nextDeparture &&
-                      returnDate <= nextDeparture
-                    ) {
-                      setReturnDate(
-                        shiftISODate(nextDeparture, 1)
-                      );
+                    if (nextDeparture && returnDate <= nextDeparture) {
+                      setReturnDate(shiftISODate(nextDeparture, 1));
                     }
                   }}
                   required
@@ -455,9 +622,7 @@ export default function TripPlannerForm({ onPlansGenerated }) {
                   type="date"
                   value={returnDate}
                   min={shiftISODate(departureDate || today, 1)}
-                  onChange={(event) =>
-                    setReturnDate(event.target.value)
-                  }
+                  onChange={(event) => setReturnDate(event.target.value)}
                   required
                 />
               </div>
@@ -493,9 +658,7 @@ export default function TripPlannerForm({ onPlansGenerated }) {
                   min="1"
                   max="50"
                   value={travellers}
-                  onChange={(event) =>
-                    setTravellers(event.target.value)
-                  }
+                  onChange={(event) => setTravellers(event.target.value)}
                   placeholder="Number of people"
                   required
                 />
@@ -507,9 +670,7 @@ export default function TripPlannerForm({ onPlansGenerated }) {
                 <select
                   className={inputClass}
                   value={groupType}
-                  onChange={(event) =>
-                    setGroupType(event.target.value)
-                  }
+                  onChange={(event) => setGroupType(event.target.value)}
                 >
                   <option>Solo</option>
                   <option>Couple</option>
@@ -554,9 +715,7 @@ export default function TripPlannerForm({ onPlansGenerated }) {
                   <input
                     className={inputClass}
                     value={childrenAges}
-                    onChange={(event) =>
-                      setChildrenAges(event.target.value)
-                    }
+                    onChange={(event) => setChildrenAges(event.target.value)}
                     placeholder="e.g. 5, 8"
                   />
 
@@ -567,16 +726,12 @@ export default function TripPlannerForm({ onPlansGenerated }) {
               )}
 
               <div className="md:col-span-2">
-                <FieldLabel>
-                  Anything else about your group?
-                </FieldLabel>
+                <FieldLabel>Anything else about your group?</FieldLabel>
 
                 <textarea
                   className={`${inputClass} min-h-24 resize-y`}
                   value={groupDetails}
-                  onChange={(event) =>
-                    setGroupDetails(event.target.value)
-                  }
+                  onChange={(event) => setGroupDetails(event.target.value)}
                   maxLength={500}
                   placeholder="e.g. We prefer scenic drives and quieter places..."
                 />
@@ -603,9 +758,7 @@ export default function TripPlannerForm({ onPlansGenerated }) {
                   min="1"
                   step="any"
                   value={budget}
-                  onChange={(event) =>
-                    setBudget(event.target.value)
-                  }
+                  onChange={(event) => setBudget(event.target.value)}
                   placeholder="Enter your total budget"
                   required
                 />
@@ -621,9 +774,7 @@ export default function TripPlannerForm({ onPlansGenerated }) {
                 <select
                   className={inputClass}
                   value={currency}
-                  onChange={(event) =>
-                    setCurrency(event.target.value)
-                  }
+                  onChange={(event) => setCurrency(event.target.value)}
                 >
                   <option value="INR">INR (₹)</option>
                   <option value="USD">USD ($)</option>
@@ -665,14 +816,11 @@ export default function TripPlannerForm({ onPlansGenerated }) {
               description="Select the experiences and travel style that suit you."
             />
 
-            <FieldLabel required>
-              What are you interested in?
-            </FieldLabel>
+            <FieldLabel required>What are you interested in?</FieldLabel>
 
             <div className="flex flex-wrap gap-2">
               {INTERESTS.map((interest) => {
-                const selected =
-                  selectedInterests.includes(interest);
+                const selected = selectedInterests.includes(interest);
 
                 return (
                   <button
@@ -686,9 +834,7 @@ export default function TripPlannerForm({ onPlansGenerated }) {
                         : "border-slate-200 bg-white text-slate-600 hover:border-emerald-300 hover:text-emerald-700"
                     }`}
                   >
-                    {selected && (
-                      <span className="mr-1.5">✓</span>
-                    )}
+                    {selected && <span className="mr-1.5">✓</span>}
                     {interest}
                   </button>
                 );
@@ -702,9 +848,7 @@ export default function TripPlannerForm({ onPlansGenerated }) {
                 <select
                   className={inputClass}
                   value={travelStyle}
-                  onChange={(event) =>
-                    setTravelStyle(event.target.value)
-                  }
+                  onChange={(event) => setTravelStyle(event.target.value)}
                 >
                   {TRAVEL_STYLES.map((style) => (
                     <option key={style} value={style}>
@@ -720,9 +864,7 @@ export default function TripPlannerForm({ onPlansGenerated }) {
                 <select
                   className={inputClass}
                   value={transport}
-                  onChange={(event) =>
-                    setTransport(event.target.value)
-                  }
+                  onChange={(event) => setTransport(event.target.value)}
                 >
                   {TRANSPORT_OPTIONS.map((option) => (
                     <option key={option} value={option}>
@@ -759,8 +901,8 @@ export default function TripPlannerForm({ onPlansGenerated }) {
                   notice.type === "error"
                     ? "border-rose-200 bg-rose-50 text-rose-700"
                     : notice.type === "success"
-                    ? "border-emerald-200 bg-emerald-50 text-emerald-800"
-                    : "border-sky-200 bg-sky-50 text-sky-800"
+                      ? "border-emerald-200 bg-emerald-50 text-emerald-800"
+                      : "border-sky-200 bg-sky-50 text-sky-800"
                 }`}
               >
                 {notice.message}
