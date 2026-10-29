@@ -390,6 +390,7 @@ export default function TripPlannerForm({ onPlansGenerated }) {
               planId,
             });
 
+
             if (!result.plan || result.plan.id !== planId) {
               throw new Error(
                 `Triply did not return a valid overview for ${planId}.`
@@ -432,6 +433,9 @@ export default function TripPlannerForm({ onPlansGenerated }) {
                 startDay,
                 endDay,
                 overview,
+              
+                // Send all previously completed days for this plan.
+                previousDays: daysByPlan[overview.id],
               });
 
               if (
