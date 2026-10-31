@@ -4,7 +4,8 @@ const MODEL = "@cf/zai-org/glm-4.7-flash";
 
 const MAX_CHUNK_DAYS = 4;
 const MAX_CHUNK_ATTEMPTS = 3;
-const MAX_ATTRACTION_REPAIR_ATTEMPTS = 5;
+const MAX_ATTRACTION_REPAIR_ATTEMPTS = 3;
+const REPLACEMENT_CANDIDATES_PER_REQUEST = 8;
 
 const PLAN_IDS = [
   "budget-explorer",
@@ -96,11 +97,14 @@ const DaySchema = z.object({
   estimatedCost: z.number().nonnegative(),
   localTip: z.string().trim().min(1),
 });
-
 const AttractionRepairSchema = z.object({
-  attraction: z.string().trim().min(2).max(120),
-  timeOfDay: z.enum(["morning", "afternoon", "evening"]),
-  activityDescription: z.string().trim().min(1).max(1000),
+  candidates: z.array(
+    z.object({
+      attraction: z.string().trim().min(2).max(120),
+      timeOfDay: z.enum(["morning", "afternoon", "evening"]),
+      activityDescription: z.string().trim().min(1).max(1000),
+    })
+  ).min(1).max(8),
 });
 
 // --------------------------------------------------
@@ -856,22 +860,40 @@ ATTRACTIONS ALREADY USED IN THIS ITINERARY:
 ${JSON.stringify(usedAttractions, null, 2)}
 
 TASK:
-Replace ONLY the duplicate attraction with one different, real,
-identifiable sightseeing attraction in or reasonably near
-${trip.destination}.
+Generate exactly ${REPLACEMENT_CANDIDATES_PER_REQUEST} alternative
+sightseeing attractions in or reasonably near ${trip.destination}.
 
-Do not select any attraction from the used attractions list.
-Do not rename a used attraction.
-Do not select an airport, railway station, bus stand, metro station,
-transport terminal or generic activity.
-Do not select the same attraction with a slightly different spelling.
+Each candidate must be:
+- A real, identifiable sightseeing attraction.
+- Different from every attraction in the used attractions list.
+- Different from the other candidates in this response.
+- Suitable for the requested destination and travel plan.
+- A genuine place, not a generic activity.
 
-Return exactly this JSON structure:
+STRICT RULES:
+- Never return an attraction from the used attractions list.
+- Never rename an existing attraction to bypass uniqueness.
+- Never return the original duplicate attraction.
+- Do not return airports, railway stations, bus stands,
+  metro stations, transport terminals or transit hubs.
+- Do not return generic activities, restaurants or hotels
+  as sightseeing attractions.
+- Use canonical attraction names.
+- Do not repeat candidate names in your response.
+- If you cannot generate 8 valid alternatives, return
+  as many genuinely valid alternatives as possible.
+- Never invent fictional places.
+
+Return this JSON structure:
 
 {
-  "attraction": "New canonical attraction name",
-  "timeOfDay": "morning",
-  "activityDescription": "A useful replacement activity description"
+  "candidates": [
+    {
+      "attraction": "Canonical attraction name",
+      "timeOfDay": "morning",
+      "activityDescription": "Useful activity description for this attraction"
+    }
+  ]
 }
 
 timeOfDay must be exactly one of:
@@ -879,10 +901,10 @@ timeOfDay must be exactly one of:
 - afternoon
 - evening
 
-The activityDescription must describe the replacement attraction
-and must not mention the duplicate attraction being replaced.
+The activityDescription must describe the candidate attraction.
+It must not mention the duplicate attraction being replaced.
 
-Return valid JSON only. No Markdown.
+Return valid JSON only. No Markdown or code fences.
 `;
 }
 
@@ -895,6 +917,8 @@ async function requestReplacementAttraction({
 }) {
   let lastError = "";
 
+  // This list contains all previously used attractions and
+  // every invalid candidate returned by earlier AI requests.
   const forbidden = [...usedAttractions];
 
   for (
@@ -908,6 +932,7 @@ async function requestReplacementAttraction({
       duplicateAttraction,
       attempt,
       maxAttempts: MAX_ATTRACTION_REPAIR_ATTEMPTS,
+      candidatesPerRequest: REPLACEMENT_CANDIDATES_PER_REQUEST,
     });
 
     const prompt = buildAttractionRepairPrompt({
@@ -921,10 +946,17 @@ async function requestReplacementAttraction({
     let parsed;
 
     try {
-      parsed = await callCloudflareAI(trip, prompt, 1000);
+      // Ask for multiple alternatives in one AI request.
+      parsed = await callCloudflareAI(trip, prompt, 2200);
     } catch (error) {
       lastError = error.message;
-      console.warn("Attraction repair request failed:", lastError);
+
+      console.warn("Attraction candidate request failed:", {
+        day: day.day,
+        attempt,
+        error: lastError,
+      });
+
       continue;
     }
 
@@ -935,47 +967,96 @@ async function requestReplacementAttraction({
         result.error.issues
       ).join("; ");
 
-      console.warn("Invalid attraction repair response:", lastError);
+      console.warn("Invalid attraction candidates response:", {
+        day: day.day,
+        attempt,
+        error: lastError,
+      });
+
       continue;
     }
 
-    const replacement = result.data;
+    const candidates = result.data.candidates;
 
-    if (isTransportInfrastructure(replacement.attraction)) {
-      lastError = "Replacement was transport infrastructure.";
-      forbidden.push(replacement.attraction);
-      continue;
-    }
-
-    if (
-      areSameAttraction(
-        replacement.attraction,
-        duplicateAttraction
-      )
-    ) {
-      lastError = "Replacement was the same duplicate attraction.";
-      forbidden.push(replacement.attraction);
-      continue;
-    }
-
-    if (
-      isAlreadyUsed(
-        replacement.attraction,
-        forbidden
-      )
-    ) {
-      lastError = "Replacement attraction was already used.";
-      forbidden.push(replacement.attraction);
-      continue;
-    }
-
-    console.log("Attraction replacement accepted:", {
+    console.log("Attraction candidates received:", {
       day: day.day,
-      oldAttraction: duplicateAttraction,
-      newAttraction: replacement.attraction,
+      attempt,
+      count: candidates.length,
     });
 
-    return replacement;
+    // Check each candidate independently.
+    // Accept the first genuinely unused attraction.
+    for (const candidate of candidates) {
+      const attraction = candidate.attraction.trim();
+
+      if (!attraction) {
+        lastError = "Candidate attraction name was empty.";
+        continue;
+      }
+
+      if (isTransportInfrastructure(attraction)) {
+        lastError = "Candidate was transport infrastructure.";
+
+        forbidden.push(attraction);
+
+        console.warn("Rejected transport infrastructure candidate:", {
+          day: day.day,
+          attraction,
+        });
+
+        continue;
+      }
+
+      if (
+        areSameAttraction(
+          attraction,
+          duplicateAttraction
+        )
+      ) {
+        lastError = "Candidate was the original duplicate attraction.";
+
+        forbidden.push(attraction);
+
+        continue;
+      }
+
+      if (isAlreadyUsed(attraction, forbidden)) {
+        lastError = "Candidate attraction was already used.";
+
+        console.warn("Rejected already-used attraction:", {
+          day: day.day,
+          attraction,
+        });
+
+        continue;
+      }
+
+      // Accept this candidate immediately.
+      // It is now guaranteed to be unique against the used list.
+      console.log("Attraction replacement accepted:", {
+        planId,
+        day: day.day,
+        oldAttraction: duplicateAttraction,
+        newAttraction: attraction,
+        attempt,
+        candidatesChecked: candidates.indexOf(candidate) + 1,
+      });
+
+      return candidate;
+    }
+
+    // None of the candidates was valid.
+    // The next AI request receives all rejected candidates
+    // as forbidden suggestions.
+    lastError =
+      `All ${candidates.length} candidates were invalid or already used.`;
+
+    console.warn("No valid attraction found in candidate batch:", {
+      planId,
+      day: day.day,
+      attempt,
+      candidates: candidates.map((item) => item.attraction),
+    });
   }
 
   throw new Error(
