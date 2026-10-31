@@ -2,6 +2,7 @@ import { z } from "zod";
 
 const MODEL = "@cf/zai-org/glm-4.7-flash";
 const MAX_CHUNK_DAYS = 4;
+const MAX_CHUNK_ATTEMPTS = 3;
 
 const TripBriefSchema = z.object({
   origin: z.string().trim().min(1).max(120),
@@ -78,15 +79,15 @@ const PlanOverviewSchema = z.object({
 
 const DaySchema = z.object({
   day: z.number().int().positive(),
-  title: z.string().min(1),
-  morning: z.string().min(1),
-  afternoon: z.string().min(1),
-  evening: z.string().min(1),
+  title: z.string().trim().min(1),
+  morning: z.string().trim().min(1),
+  afternoon: z.string().trim().min(1),
+  evening: z.string().trim().min(1),
   attractions: z.array(
     z.string().trim().min(2).max(120)
   ).min(1).max(8),
   estimatedCost: z.number().nonnegative(),
-  localTip: z.string().min(1),
+  localTip: z.string().trim().min(1),
 });
 
 function sendError(res, status, error) {
@@ -168,6 +169,10 @@ function getPlanStyle(planId) {
   return styles[planId];
 }
 
+// --------------------------------------------------
+// ATTRACTION NORMALIZATION AND DUPLICATE DETECTION
+// --------------------------------------------------
+
 function normalizeAttraction(value) {
   return String(value ?? "")
     .normalize("NFKD")
@@ -179,12 +184,77 @@ function normalizeAttraction(value) {
     .replace(/\s+/g, " ");
 }
 
+function areSameAttraction(first, second) {
+  const a = normalizeAttraction(first);
+  const b = normalizeAttraction(second);
+
+  if (!a || !b) return false;
+
+  if (a === b) return true;
+
+  // Remove common generic suffixes to catch naming variations.
+  const genericSuffixes = [
+    "viewpoint",
+    "view point",
+    "view",
+    "beach",
+    "lake",
+    "fort",
+    "museum",
+    "market",
+    "garden",
+    "temple",
+    "church",
+    "palace",
+    "waterfall",
+  ];
+
+  function removeGenericSuffix(value) {
+    let normalized = value;
+
+    for (const suffix of genericSuffixes) {
+      const ending = ` ${suffix}`;
+
+      if (normalized.endsWith(ending)) {
+        normalized = normalized.slice(0, -ending.length).trim();
+        break;
+      }
+    }
+
+    return normalized;
+  }
+
+  const baseA = removeGenericSuffix(a);
+  const baseB = removeGenericSuffix(b);
+
+  if (baseA.length >= 7 && baseA === baseB) {
+    return true;
+  }
+
+  // Catch a specific place name followed by an extra descriptor,
+  // but avoid arbitrary substring matches.
+  const tokensA = a.split(" ");
+  const tokensB = b.split(" ");
+
+  const shorter = tokensA.length <= tokensB.length ? tokensA : tokensB;
+  const longer = tokensA.length > tokensB.length ? tokensA : tokensB;
+
+  if (
+    shorter.length >= 2 &&
+    shorter.length < longer.length &&
+    shorter.every((token, index) => token === longer[index])
+  ) {
+    return true;
+  }
+
+  return false;
+}
+
 function findDuplicateAttractions(previousDays, candidateDays) {
   const seen = (previousDays ?? []).flatMap((day) =>
     (day.attractions ?? []).map((name) => ({
       name,
       day: day.day,
-      normalized: normalizeAttraction(name),
     }))
   );
 
@@ -192,25 +262,9 @@ function findDuplicateAttractions(previousDays, candidateDays) {
 
   for (const day of candidateDays) {
     for (const name of day.attractions ?? []) {
-      const normalized = normalizeAttraction(name);
-
-      if (!normalized) continue;
-
-      const match = seen.find((item) => {
-        const existing = item.normalized;
-
-        if (!existing) return false;
-
-        if (existing === normalized) return true;
-
-        // Catch common variants such as:
-        // "Futala Lake" and "Futala Lake Viewpoint".
-        return (
-          Math.min(existing.length, normalized.length) >= 7 &&
-          (existing.includes(normalized) ||
-            normalized.includes(existing))
-        );
-      });
+      const match = seen.find((item) =>
+        areSameAttraction(item.name, name)
+      );
 
       if (match) {
         duplicates.push({
@@ -223,7 +277,6 @@ function findDuplicateAttractions(previousDays, candidateDays) {
         seen.push({
           name,
           day: day.day,
-          normalized,
         });
       }
     }
@@ -232,6 +285,23 @@ function findDuplicateAttractions(previousDays, candidateDays) {
   return duplicates;
 }
 
+// --------------------------------------------------
+// VALIDATION ERROR DETAILS FOR AI RETRIES
+// --------------------------------------------------
+
+function getValidationFeedback(issues) {
+  return issues.map((issue) => {
+    const field = issue.path.length
+      ? issue.path.join(".")
+      : "response";
+
+    return `Field: ${field}. Problem: ${issue.message}`;
+  });
+}
+
+// --------------------------------------------------
+// CLOUDFLARE AI
+// --------------------------------------------------
 
 async function callCloudflareAI(trip, prompt, maxTokens) {
   const accountId = process.env.CLOUDFLARE_ACCOUNT_ID;
@@ -265,7 +335,8 @@ async function callCloudflareAI(trip, prompt, maxTokens) {
           content:
             "You are Triply, a precise travel-planning assistant. " +
             "Return valid JSON only, with no Markdown. " +
-            "Follow the requested JSON fields exactly. " +
+            "Follow every requested JSON field exactly. " +
+            "Never omit required fields. " +
             "Never invent confirmed bookings or live prices. " +
             "Use realistic estimates and complete all requested fields.",
         },
@@ -308,6 +379,10 @@ async function callCloudflareAI(trip, prompt, maxTokens) {
 
   return parseModelJSON(extractModelText(data));
 }
+
+// --------------------------------------------------
+// PLAN OVERVIEW GENERATION
+// --------------------------------------------------
 
 async function generateOverview(trip, planId) {
   const prompt = `
@@ -411,27 +486,36 @@ Rules:
   };
 }
 
-async function generateDayChunk(
+// --------------------------------------------------
+// CHUNK PROMPT
+// --------------------------------------------------
+
+function buildDayChunkPrompt({
   trip,
   planId,
   startDay,
   endDay,
   overview,
-  previousDays = []
-) {
-  let retryInstruction = "";
+  previousDays,
+  retryFeedback,
+}) {
+  const previousDayContext = previousDays.map((day) => ({
+    day: day.day,
+    title: day.title,
+    attractions: day.attractions,
+    morning: day.morning,
+    afternoon: day.afternoon,
+    evening: day.evening,
+  }));
 
-  for (let attempt = 1; attempt <= 2; attempt += 1) {
-    const previousDayContext = previousDays.map((day) => ({
+  const previousAttractions = previousDays.flatMap((day) =>
+    (day.attractions ?? []).map((name) => ({
       day: day.day,
-      title: day.title,
-      attractions: day.attractions,
-      morning: day.morning,
-      afternoon: day.afternoon,
-      evening: day.evening,
-    }));
+      name,
+    }))
+  );
 
-    const prompt = `
+  return `
 Create itinerary days for part of one existing travel plan.
 
 TRIP:
@@ -446,34 +530,32 @@ ${getPlanStyle(planId)}
 PREVIOUSLY COMPLETED DAYS FOR THIS SAME PLAN:
 ${JSON.stringify(previousDayContext, null, 2)}
 
+PREVIOUSLY USED ATTRACTIONS:
+${JSON.stringify(previousAttractions, null, 2)}
+
 IMPORTANT: THE PREVIOUS DAYS ARE PART OF THE SAME COMPLETE TRIP.
 
 ATTRACTION UNIQUENESS RULES:
-- Never recommend an attraction, landmark, named venue, market,
-  garden, lake, temple, museum or other main destination already
-  listed in the previous days' attractions arrays.
-- Treat spelling variations and longer versions of the same place
-  name as the same attraction.
-- Do not repeat attractions between different days in this
-  requested chunk either.
-- Each day's attractions array must contain canonical, specific
-  names of its main attractions, not generic activities.
-- Activity descriptions must agree with the attraction names
-  returned in that day's attractions array.
-- Do not reuse a previous attraction merely by describing a
-  different activity at the same place.
-- Choose other suitable attractions in the destination instead.
-- Do not invent places that you cannot reasonably identify as
-  attractions at the requested destination.
-- Normal travel logistics may recur when necessary, but the main
-  sightseeing attractions must be distinct.
+- Never repeat any attraction from the previously used attractions list.
+- Never repeat the same attraction on two days in the requested chunk.
+- Treat spelling variations and descriptive name variations as the same place.
+- Do not reuse a previous attraction by describing a different activity at the same place.
+- Each day's attractions array must contain canonical, specific names of its main attractions.
+- Activity descriptions must agree with the attraction names in that day's attractions array.
+- Choose other suitable attractions in the destination.
+- Do not invent places that cannot reasonably be identified as attractions at the requested destination.
+- Normal travel logistics may recur when necessary, but main sightseeing attractions must be distinct.
 
-Generate days ${startDay} through ${endDay}, inclusive.
+GENERATE DAYS ${startDay} THROUGH ${endDay}, INCLUSIVE.
+
 Return exactly ${endDay - startDay + 1} day objects.
-The first day number must be ${startDay}.
-The final day number must be ${endDay}.
+Day numbers must be consecutive and exact:
+${Array.from(
+  { length: endDay - startDay + 1 },
+  (_, index) => startDay + index
+).join(", ")}
 
-Return this JSON structure:
+RETURN THIS JSON STRUCTURE:
 {
   "days": [
     {
@@ -492,105 +574,293 @@ Return this JSON structure:
   ]
 }
 
-Rules:
-- Use places and activities that fit the destination and trip preferences.
-- Every day must have morning, afternoon and evening activities.
-- Return between 1 and 8 distinct, named attractions for each day.
-- An attraction must not appear in multiple days of this trip.
-- Keep each day's plan useful, realistic and concise.
-- Do not invent bookings, live availability or confirmed prices.
-- estimatedCost is a non-negative estimate in ${trip.budget.currency}.
+REQUIRED FIELD RULES:
+- Every day MUST contain all eight fields:
+  day, title, morning, afternoon, evening, attractions, estimatedCost, localTip.
+- morning, afternoon, evening, title and localTip must be non-empty strings.
+- attractions must be an array containing 1 to 8 distinct named attractions.
+- estimatedCost must be a non-negative number.
+- Do not omit a field.
+- Do not use null for any field.
+- Do not return fewer or more days than requested.
 - Do not return overview fields or days outside the requested range.
+- Use places and activities that fit the destination and trip preferences.
+- Do not invent bookings, live availability or confirmed prices.
+- estimatedCost is an estimate in ${trip.budget.currency}.
 - Return valid JSON only, without Markdown or code fences.
 
-${retryInstruction}
-`;
+${retryFeedback ? `
+IMPORTANT CORRECTION REQUIRED:
+Your previous response failed validation.
 
-    const parsed = await callCloudflareAI(trip, prompt, 2500);
+${retryFeedback}
+
+Fix every listed problem before returning the new JSON.
+Do not repeat the same invalid response.
+Return the complete requested chunk again.
+` : ""}
+`;
+}
+
+// --------------------------------------------------
+// DAY CHUNK GENERATION WITH CONTROLLED RECOVERY
+// --------------------------------------------------
+
+async function generateDayChunk(
+  trip,
+  planId,
+  startDay,
+  endDay,
+  overview,
+  previousDays = []
+) {
+  let retryFeedback = "";
+  let lastFailure = null;
+
+  for (
+    let attempt = 1;
+    attempt <= MAX_CHUNK_ATTEMPTS;
+    attempt += 1
+  ) {
+    console.log("Triply chunk attempt:", {
+      planId,
+      startDay,
+      endDay,
+      attempt,
+      maxAttempts: MAX_CHUNK_ATTEMPTS,
+    });
+
+    const prompt = buildDayChunkPrompt({
+      trip,
+      planId,
+      startDay,
+      endDay,
+      overview,
+      previousDays,
+      retryFeedback,
+    });
+
+    const parsed = await callCloudflareAI(
+      trip,
+      prompt,
+      3500
+    );
 
     const result = z
       .object({
-        days: z.array(DaySchema).length(endDay - startDay + 1),
+        days: z.array(z.unknown()).length(
+          endDay - startDay + 1
+        ),
       })
       .safeParse(parsed);
 
     if (!result.success) {
+      const feedback = getValidationFeedback(
+        result.error.issues
+      );
+
       console.error(
-        `Invalid itinerary chunk (${startDay}-${endDay}):`,
-        JSON.stringify(result.error.issues, null, 2)
+        `Invalid chunk structure (${startDay}-${endDay}):`,
+        feedback
       );
 
-      if (attempt === 1) {
-        retryInstruction =
-          "Your previous response did not match the required JSON " +
-          "structure. Return every required field, including the " +
-          "attractions array for every day.";
+      lastFailure = "invalid-structure";
 
-        continue;
-      }
+      retryFeedback = `
+The response must contain exactly ${
+        endDay - startDay + 1
+      } objects inside the days array.
 
-      throw new Error(
-        `The AI returned an incomplete itinerary for days ${startDay}-${endDay}.`
-      );
-    }
+Validation errors:
+${feedback.join("\n")}
 
-    const days = result.data.days;
-
-    const invalidDayNumbers = days.some(
-      (day, index) => day.day !== startDay + index
-    );
-
-    if (invalidDayNumbers) {
-      if (attempt === 1) {
-        retryInstruction =
-          "Your previous response contained incorrect day numbers. " +
-          "Return exactly the requested consecutive day numbers.";
-
-        continue;
-      }
-
-      throw new Error(
-        `The AI returned incorrect day numbers for days ${startDay}-${endDay}.`
-      );
-    }
-
-    const duplicates = findDuplicateAttractions(previousDays, days);
-
-    if (duplicates.length > 0) {
-      console.warn("Duplicate attractions detected:", duplicates);
-
-      if (attempt === 1) {
-        retryInstruction = `
-Your previous response repeated these attractions:
-${JSON.stringify(duplicates, null, 2)}
-
-Regenerate the entire requested chunk. Replace every duplicate
-with a different, suitable attraction. Do not merely rename the
-same place. Check all previously completed days and all days in
-your new chunk before returning your JSON.
+Return every requested day with every required field.
 `;
 
+      if (attempt < MAX_CHUNK_ATTEMPTS) {
         continue;
       }
 
-      throw new Error(
-        `Repeated attractions were detected in days ${startDay}-${endDay}. Please retry the itinerary generation.`
-      );
+      break;
     }
+
+    const daysResult = z
+      .array(DaySchema)
+      .length(endDay - startDay + 1)
+      .safeParse(result.data.days);
+
+    if (!daysResult.success) {
+      const feedback = getValidationFeedback(
+        daysResult.error.issues
+      );
+
+      console.error(
+        `Invalid itinerary fields (${startDay}-${endDay}):`,
+        JSON.stringify(daysResult.error.issues, null, 2)
+      );
+
+      lastFailure = "missing-or-invalid-fields";
+
+      retryFeedback = `
+Your previous response contained missing or invalid fields.
+
+Exact validation errors:
+${feedback.join("\n")}
+
+For every listed day:
+- Provide all required fields.
+- morning, afternoon and evening must be non-empty strings.
+- attractions must be an array of named places.
+- estimatedCost must be a non-negative number.
+- localTip must be a non-empty string.
+
+Do not omit any field. Return the complete chunk again.
+`;
+
+      if (attempt < MAX_CHUNK_ATTEMPTS) {
+        continue;
+      }
+
+      break;
+    }
+
+    const days = daysResult.data;
+
+    // Verify exact consecutive day numbers.
+    const invalidDayNumbers = days
+      .filter((day, index) => day.day !== startDay + index)
+      .map((day) => ({
+        received: day.day,
+        expected: startDay + days.indexOf(day),
+      }));
+
+    if (invalidDayNumbers.length > 0) {
+      console.warn(
+        "Incorrect day numbers detected:",
+        invalidDayNumbers
+      );
+
+      lastFailure = "invalid-day-numbers";
+
+      retryFeedback = `
+Your previous response contained incorrect day numbers.
+
+Expected consecutive day numbers:
+${Array.from(
+  { length: endDay - startDay + 1 },
+  (_, index) => startDay + index
+).join(", ")}
+
+Incorrect values:
+${JSON.stringify(invalidDayNumbers, null, 2)}
+
+Return exactly the expected day numbers in the correct order.
+`;
+
+      if (attempt < MAX_CHUNK_ATTEMPTS) {
+        continue;
+      }
+
+      break;
+    }
+
+    // Verify attractions are unique across previous and new days.
+    const duplicates = findDuplicateAttractions(
+      previousDays,
+      days
+    );
+
+    if (duplicates.length > 0) {
+      console.warn(
+        "Duplicate attractions detected:",
+        duplicates
+      );
+
+      lastFailure = "duplicate-attractions";
+
+      retryFeedback = `
+Your previous response repeated attractions.
+
+Duplicate details:
+${JSON.stringify(duplicates, null, 2)}
+
+Previously completed days and their attractions:
+${JSON.stringify(
+  previousDays.map((day) => ({
+    day: day.day,
+    attractions: day.attractions,
+  })),
+  null,
+  2
+)}
+
+You MUST replace every duplicate with a genuinely different,
+suitable attraction.
+
+Do not rename the same place.
+Do not use spelling variations of the same place.
+Do not repeat attractions between any two days in this chunk.
+Check all attraction names before returning the response.
+
+Return the complete requested chunk again.
+`;
+
+      if (attempt < MAX_CHUNK_ATTEMPTS) {
+        continue;
+      }
+
+      break;
+    }
+
+    console.log("Triply chunk validated successfully:", {
+      planId,
+      startDay,
+      endDay,
+      attempt,
+      dayCount: days.length,
+    });
 
     return days;
   }
 
+  console.error("Triply chunk generation exhausted retries:", {
+    planId,
+    startDay,
+    endDay,
+    attempts: MAX_CHUNK_ATTEMPTS,
+    lastFailure,
+  });
+
+  if (lastFailure === "duplicate-attractions") {
+    throw new Error(
+      `Repeated attractions were detected in days ${startDay}-${endDay} after ${MAX_CHUNK_ATTEMPTS} attempts.`
+    );
+  }
+
+  if (lastFailure === "invalid-day-numbers") {
+    throw new Error(
+      `The AI returned incorrect day numbers for days ${startDay}-${endDay} after ${MAX_CHUNK_ATTEMPTS} attempts.`
+    );
+  }
+
   throw new Error(
-    `Unable to generate a unique itinerary for days ${startDay}-${endDay}.`
+    `The AI returned an incomplete or invalid itinerary for days ${startDay}-${endDay} after ${MAX_CHUNK_ATTEMPTS} attempts.`
   );
 }
+
+// --------------------------------------------------
+// API HANDLER
+// --------------------------------------------------
 
 export default async function handler(req, res) {
   if (req.method !== "POST") {
     res.setHeader("Allow", ["POST"]);
 
-    return sendError(res, 405, "Method not allowed. Use POST.");
+    return sendError(
+      res,
+      405,
+      "Method not allowed. Use POST."
+    );
   }
 
   try {
@@ -598,18 +868,38 @@ export default async function handler(req, res) {
     const tripResult = TripBriefSchema.safeParse(body.trip);
 
     if (!tripResult.success) {
-      return sendError(res, 400, "Invalid trip details.");
+      console.error(
+        "Invalid trip details:",
+        tripResult.error.issues
+      );
+
+      return sendError(
+        res,
+        400,
+        "Invalid trip details."
+      );
     }
 
     const trip = tripResult.data;
     const { mode, planId } = body;
 
     if (!PLAN_IDS.includes(planId)) {
-      return sendError(res, 400, "Invalid plan ID.");
+      return sendError(
+        res,
+        400,
+        "Invalid plan ID."
+      );
     }
 
+    // ----------------------------------------------
+    // OVERVIEW MODE
+    // ----------------------------------------------
+
     if (mode === "overview") {
-      const plan = await generateOverview(trip, planId);
+      const plan = await generateOverview(
+        trip,
+        planId
+      );
 
       return res.status(200).json({
         success: true,
@@ -617,6 +907,10 @@ export default async function handler(req, res) {
         plan,
       });
     }
+
+    // ----------------------------------------------
+    // DAYS MODE
+    // ----------------------------------------------
 
     if (mode === "days") {
       const startDay = Number(body.startDay);
@@ -637,51 +931,61 @@ export default async function handler(req, res) {
         );
       }
 
-      const overviewResult = PlanOverviewSchema.safeParse(body.overview);
+      const overviewResult =
+        PlanOverviewSchema.safeParse(body.overview);
 
       if (
         !overviewResult.success ||
         overviewResult.data.id !== planId
       ) {
-        return sendError(res, 400, "Invalid plan overview.");
+        return sendError(
+          res,
+          400,
+          "Invalid plan overview."
+        );
       }
 
-
       const previousDaysResult = z
-  .array(DaySchema)
-  .max(60)
-  .safeParse(body.previousDays ?? []);
+        .array(DaySchema)
+        .max(60)
+        .safeParse(body.previousDays ?? []);
 
-if (!previousDaysResult.success) {
-  return sendError(
-    res,
-    400,
-    "Invalid previous itinerary context."
-  );
-}
+      if (!previousDaysResult.success) {
+        console.error(
+          "Invalid previous itinerary context:",
+          previousDaysResult.error.issues
+        );
 
-const previousDays = previousDaysResult.data;
+        return sendError(
+          res,
+          400,
+          "Invalid previous itinerary context."
+        );
+      }
 
-if (
-  previousDays.length !== startDay - 1 ||
-  previousDays.some((day, index) => day.day !== index + 1)
-) {
-  return sendError(
-    res,
-    400,
-    "Previous itinerary context must contain all preceding days in order."
-  );
-}
+      const previousDays = previousDaysResult.data;
 
+      if (
+        previousDays.length !== startDay - 1 ||
+        previousDays.some(
+          (day, index) => day.day !== index + 1
+        )
+      ) {
+        return sendError(
+          res,
+          400,
+          "Previous itinerary context must contain all preceding days in order."
+        );
+      }
 
-const days = await generateDayChunk(
-  trip,
-  planId,
-  startDay,
-  endDay,
-  overviewResult.data,
-  previousDays
-);
+      const days = await generateDayChunk(
+        trip,
+        planId,
+        startDay,
+        endDay,
+        overviewResult.data,
+        previousDays
+      );
 
       return res.status(200).json({
         success: true,
@@ -699,7 +1003,10 @@ const days = await generateDayChunk(
       'Invalid mode. Use "overview" or "days".'
     );
   } catch (error) {
-    console.error("Triply chunk API error:", error);
+    console.error(
+      "Triply chunk API error:",
+      error
+    );
 
     const timedOut =
       error?.name === "TimeoutError" ||
@@ -710,7 +1017,8 @@ const days = await generateDayChunk(
       timedOut ? 504 : 502,
       timedOut
         ? "This part of the itinerary took too long. Please retry."
-        : error.message || "Could not generate this itinerary part."
+        : error.message ||
+            "Could not generate this itinerary part."
     );
   }
 }
