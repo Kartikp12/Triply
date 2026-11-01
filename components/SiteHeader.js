@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { onAuthStateChanged, signOut } from "firebase/auth";
+
 import { auth } from "../lib/firebase";
 
 export default function SiteHeader() {
@@ -32,6 +33,7 @@ export default function SiteHeader() {
           "Header authentication error:",
           error.code || error.message
         );
+
         setAuthReady(true);
       }
     );
@@ -51,8 +53,6 @@ export default function SiteHeader() {
     try {
       await signOut(auth);
       setMenuOpen(false);
-
-      // _app.js redirects the signed-out user to /login.
     } catch (error) {
       console.error(
         "Triply sign-out failed:",
@@ -72,6 +72,18 @@ export default function SiteHeader() {
     if (authUser) {
       return (
         <>
+          <a
+            href="/my-trips"
+            onClick={mobile ? closeMenu : undefined}
+            className={
+              mobile
+                ? "rounded-xl px-4 py-3 text-sm font-semibold text-[#203e32] hover:bg-[#eaf2e7]"
+                : `${baseButton} text-[#203e32] hover:bg-[#eaf2e7]`
+            }
+          >
+            My Trips
+          </a>
+
           <a
             href="/dashboard"
             onClick={mobile ? closeMenu : undefined}

@@ -6,6 +6,8 @@ import SiteHeader from "../components/SiteHeader";
 import TripPlannerForm from "../components/TripPlannerForm";
 import TripPlanResults from "../components/TripPlanResults";
 import TripPlanDetails from "../components/TripPlanDetails";
+import { auth } from "../lib/firebase";
+import { saveTrip } from "../lib/savedTrips";
 
 const DESTINATIONS = [
   {
@@ -57,10 +59,17 @@ export default function Home() {
   const [tripBrief, setTripBrief] = useState(null);
   const [selectedPlan, setSelectedPlan] = useState(null);
 
+  const [isSavingTrip, setIsSavingTrip] = useState(false);
+  const [savedTripId, setSavedTripId] = useState("");
+  const [saveTripError, setSaveTripError] = useState("");
+
   function handlePlansGenerated(generatedPlans, brief) {
     setPlans(generatedPlans);
     setTripBrief(brief);
     setSelectedPlan(null);
+
+    setSavedTripId("");
+    setSaveTripError("");
 
     setTimeout(() => {
       document.getElementById("trip-results")?.scrollIntoView({
@@ -68,6 +77,46 @@ export default function Home() {
         block: "start",
       });
     }, 150);
+  }
+
+  async function handleSaveTrip() {
+    if (
+      isSavingTrip ||
+      savedTripId ||
+      !tripBrief ||
+      plans.length !== 3
+    ) {
+      return;
+    }
+
+    const currentUser = auth?.currentUser;
+
+    if (!currentUser) {
+      setSaveTripError("Please sign in before saving your trip.");
+      return;
+    }
+
+    setIsSavingTrip(true);
+    setSaveTripError("");
+
+    try {
+      const tripId = await saveTrip({
+        uid: currentUser.uid,
+        tripBrief,
+        plans,
+      });
+
+      setSavedTripId(tripId);
+    } catch (error) {
+      console.error("Unable to save Triply trip:", error);
+
+      setSaveTripError(
+        error?.message ||
+          "We couldn't save this trip. Please try again."
+      );
+    } finally {
+      setIsSavingTrip(false);
+    }
   }
 
   function handlePlanAgain() {
@@ -83,11 +132,17 @@ export default function Home() {
     <>
       <Head>
         <title>Triply — Your Journey, Thoughtfully Planned</title>
+
         <meta
           name="description"
           content="Discover personalised travel plans with Triply. Plan your next getaway around your budget, interests and travel style."
         />
-        <meta name="viewport" content="width=device-width, initial-scale=1" />
+
+        <meta
+          name="viewport"
+          content="width=device-width, initial-scale=1"
+        />
+
         <meta name="theme-color" content="#f8fafc" />
       </Head>
 
@@ -98,6 +153,7 @@ export default function Home() {
 
         <section className="relative isolate overflow-hidden bg-[#f7faf8]">
           <div className="pointer-events-none absolute -right-32 -top-20 h-96 w-96 rounded-full bg-emerald-200/40 blur-3xl" />
+
           <div className="pointer-events-none absolute -bottom-32 -left-20 h-96 w-96 rounded-full bg-amber-100/60 blur-3xl" />
 
           <div className="relative mx-auto grid max-w-7xl items-center gap-12 px-5 pb-16 pt-14 sm:px-8 sm:pb-24 sm:pt-20 lg:grid-cols-[1.05fr_0.95fr] lg:gap-10 lg:px-10 lg:py-24">
@@ -114,6 +170,7 @@ export default function Home() {
               <h1 className="mt-7 max-w-2xl text-5xl font-semibold leading-[1.08] tracking-tight text-slate-950 sm:text-6xl lg:text-7xl">
                 Less planning.
                 <br />
+
                 <span className="font-serif italic text-emerald-700">
                   More living.
                 </span>
@@ -163,10 +220,12 @@ export default function Home() {
                   <span className="text-emerald-600">✓</span>
                   Personalised itineraries
                 </span>
+
                 <span className="flex items-center gap-2">
                   <span className="text-emerald-600">✓</span>
                   Budget-conscious planning
                 </span>
+
                 <span className="flex items-center gap-2">
                   <span className="text-emerald-600">✓</span>
                   Your travel style
@@ -193,6 +252,7 @@ export default function Home() {
                   <p className="text-[10px] font-bold uppercase tracking-[0.18em] text-slate-500">
                     Your next escape
                   </p>
+
                   <p className="mt-1 text-sm font-bold text-slate-900">
                     Somewhere beautiful.
                   </p>
@@ -202,9 +262,11 @@ export default function Home() {
                   <p className="text-xs font-semibold uppercase tracking-[0.2em] text-white/75">
                     A world waiting for you
                   </p>
+
                   <h2 className="mt-2 font-serif text-3xl italic sm:text-4xl">
                     Find your somewhere.
                   </h2>
+
                   <p className="mt-3 max-w-sm text-sm leading-6 text-white/85">
                     From spontaneous escapes to long-awaited adventures,
                     start with a feeling and let the journey unfold.
@@ -217,10 +279,12 @@ export default function Home() {
                   <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-emerald-50 text-xl">
                     ✨
                   </div>
+
                   <div>
                     <p className="text-sm font-bold text-slate-900">
                       Made around you
                     </p>
+
                     <p className="mt-1 text-xs text-slate-500">
                       Your interests. Your budget.
                     </p>
@@ -277,7 +341,10 @@ export default function Home() {
                   initial={{ opacity: 0, y: 18 }}
                   whileInView={{ opacity: 1, y: 0 }}
                   viewport={{ once: true, amount: 0.15 }}
-                  transition={{ duration: 0.45, delay: index * 0.1 }}
+                  transition={{
+                    duration: 0.45,
+                    delay: index * 0.1,
+                  }}
                   className="group overflow-hidden rounded-3xl border border-slate-100 bg-white shadow-sm transition duration-300 hover:-translate-y-1 hover:shadow-xl hover:shadow-slate-900/10"
                 >
                   <div className="relative overflow-hidden">
@@ -398,6 +465,10 @@ export default function Home() {
               currency={tripBrief?.budget?.currency || "INR"}
               onOpenPlan={setSelectedPlan}
               onPlanAgain={handlePlanAgain}
+              onSaveTrip={handleSaveTrip}
+              isSavingTrip={isSavingTrip}
+              savedTripId={savedTripId}
+              saveTripError={saveTripError}
             />
           </section>
         )}
@@ -407,6 +478,7 @@ export default function Home() {
         <section className="px-5 pb-16 sm:px-8 sm:pb-20 lg:px-10">
           <div className="relative mx-auto max-w-7xl overflow-hidden rounded-[2rem] bg-emerald-950 px-6 py-14 text-center sm:px-12 sm:py-20">
             <div className="pointer-events-none absolute -left-20 -top-20 h-64 w-64 rounded-full bg-emerald-700/30 blur-3xl" />
+
             <div className="pointer-events-none absolute -bottom-24 -right-10 h-72 w-72 rounded-full bg-teal-500/20 blur-3xl" />
 
             <div className="relative mx-auto max-w-2xl">
@@ -455,7 +527,9 @@ export default function Home() {
               <span className="flex h-8 w-8 items-center justify-center rounded-xl bg-emerald-700 text-sm text-white">
                 T
               </span>
+
               triply
+
               <span className="text-emerald-700">.</span>
             </a>
 

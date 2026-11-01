@@ -1,4 +1,3 @@
-
 import TripPlanCard from "./TripPlanCard";
 
 export default function TripPlanResults({
@@ -7,6 +6,10 @@ export default function TripPlanResults({
   currency = "INR",
   onOpenPlan,
   onPlanAgain,
+  onSaveTrip,
+  isSavingTrip = false,
+  savedTripId = "",
+  saveTripError = "",
 }) {
   if (!Array.isArray(plans) || plans.length === 0) {
     return null;
@@ -75,15 +78,35 @@ export default function TripPlanResults({
             </p>
           </div>
 
-          {onPlanAgain && (
-            <button
-              type="button"
-              onClick={onPlanAgain}
-              className="inline-flex min-h-11 items-center justify-center gap-2 self-start rounded-full border border-[#dce3d9] bg-white px-5 py-3 text-sm font-semibold text-[#315342] transition hover:border-[#176f60] hover:text-[#176f60] sm:self-auto"
-            >
-              + Plan another trip
-            </button>
-          )}
+          <div className="flex flex-wrap items-center gap-3">
+            {onPlanAgain && (
+              <button
+                type="button"
+                onClick={onPlanAgain}
+                className="inline-flex min-h-11 items-center justify-center gap-2 self-start rounded-full border border-[#dce3d9] bg-white px-5 py-3 text-sm font-semibold text-[#315342] transition hover:border-[#176f60] hover:text-[#176f60] sm:self-auto"
+              >
+                + Plan another trip
+              </button>
+            )}
+
+            {savedTripId ? (
+              <a
+                href={`/trips/${savedTripId}`}
+                className="inline-flex min-h-11 items-center justify-center gap-2 rounded-full bg-[#eaf2e7] px-5 py-3 text-sm font-semibold text-[#176f60] transition hover:bg-[#dcebdd]"
+              >
+                ✓ Trip saved · View trip
+              </a>
+            ) : onSaveTrip ? (
+              <button
+                type="button"
+                onClick={onSaveTrip}
+                disabled={isSavingTrip}
+                className="inline-flex min-h-11 items-center justify-center gap-2 rounded-full bg-[#203e32] px-5 py-3 text-sm font-semibold text-white transition hover:bg-[#176f60] disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {isSavingTrip ? "Saving trip..." : "♡ Save this trip"}
+              </button>
+            ) : null}
+          </div>
         </div>
 
         <div className="mb-8 flex flex-wrap items-center gap-2.5">
@@ -107,6 +130,15 @@ export default function TripPlanResults({
             </span>
           )}
         </div>
+
+        {saveTripError && (
+          <p
+            role="alert"
+            className="mb-5 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700"
+          >
+            {saveTripError}
+          </p>
+        )}
 
         <div className="grid grid-cols-1 items-stretch gap-5 md:grid-cols-2 xl:grid-cols-3 xl:gap-6">
           {plans.map((plan, index) => (
