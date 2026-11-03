@@ -381,12 +381,13 @@ export default function TripPlanDetails({
 
                 {typeof onAskAI === "function" && (
                   <button
-                    type="button"
-                    onClick={() => onAskAI(plan)}
-                    className="mt-6 flex min-h-12 w-full items-center justify-center gap-2 rounded-full bg-white px-4 py-3 text-sm font-semibold text-[#203e32] transition hover:bg-[#eaf2e7]"
-                  >
-                    ✦ Ask AI about this trip
-                  </button>
+  type="button"
+  onClick={() => onAskAI(plan)}
+  style={{ color: "#203e32" }}
+  className="mt-6 flex min-h-12 w-full items-center justify-center gap-2 rounded-full bg-white px-4 py-3 text-sm font-semibold text-[#203e32] transition hover:bg-[#eaf2e7]"
+>
+  ✦ Ask AI about this trip
+</button>
                 )}
               </section>
 

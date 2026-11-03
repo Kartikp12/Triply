@@ -172,13 +172,13 @@ export default function SiteHeader() {
 
         <div className="hidden shrink-0 items-center gap-2 lg:flex xl:gap-3">
           <AuthActions />
-
           <a
-            href="#start-planning"
-            className="inline-flex min-h-10 items-center gap-2 whitespace-nowrap rounded-full bg-[#203e32] px-4 py-3 text-sm font-semibold text-white transition hover:bg-[#176f60] xl:px-5"
-          >
-            Start planning <span aria-hidden="true">↗</span>
-          </a>
+  href="#start-planning"
+  style={{ color: "#ffffff" }}
+  className="inline-flex min-h-10 items-center gap-2 whitespace-nowrap rounded-full bg-[#203e32] px-4 py-3 text-sm font-semibold text-white transition hover:bg-[#176f60] xl:px-5"
+>
+  Start planning <span aria-hidden="true">↗</span>
+</a>
         </div>
 
         <button
@@ -211,12 +211,13 @@ export default function SiteHeader() {
             <AuthActions mobile />
 
             <a
-              href="#start-planning"
-              onClick={closeMenu}
-              className="mt-2 flex items-center justify-center gap-2 rounded-full bg-[#203e32] px-5 py-3 text-sm font-semibold text-white transition hover:bg-[#176f60]"
-            >
-              Start planning ↗
-            </a>
+  href="#start-planning"
+  onClick={closeMenu}
+  style={{ color: "#ffffff" }}
+  className="mt-2 flex items-center justify-center gap-2 rounded-full bg-[#203e32] px-5 py-3 text-sm font-semibold text-white transition hover:bg-[#176f60]"
+>
+  Start planning ↗
+</a>
           </div>
         </nav>
       )}

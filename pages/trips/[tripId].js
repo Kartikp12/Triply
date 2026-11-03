@@ -190,13 +190,14 @@ export default function SavedTripPage() {
                 </div>
 
                 <button
-                  type="button"
-                  onClick={() => openAssistant()}
-                  className="inline-flex min-h-12 items-center justify-center gap-2 self-start rounded-full bg-[#203e32] px-6 py-3 text-sm font-bold text-white shadow-sm transition hover:-translate-y-0.5 hover:bg-[#176f60] md:self-auto"
-                >
-                  <span aria-hidden="true">✦</span>
-                  Ask your Triply Assistant
-                </button>
+  type="button"
+  onClick={() => openAssistant()}
+  style={{ color: "#ffffff" }}
+  className="inline-flex min-h-12 items-center justify-center gap-2 self-start rounded-full bg-[#203e32] px-6 py-3 text-sm font-bold text-white shadow-sm transition hover:-translate-y-0.5 hover:bg-[#176f60] md:self-auto"
+>
+  <span aria-hidden="true">✦</span>
+  Ask your Triply Assistant
+</button>
               </div>
 
               <div className="mt-7 rounded-2xl border border-[#dfe8dc] bg-[#eef4e9] px-5 py-4 sm:flex sm:items-center sm:justify-between sm:gap-5">

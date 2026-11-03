@@ -158,11 +158,12 @@ export default function MyTripsPage() {
               </Link>
 
               <Link
-                href="/#start-planning"
-                className="rounded-full bg-[#203e32] px-4 py-2 text-white hover:bg-[#176f60]"
-              >
-                Plan a trip ↗
-              </Link>
+  href="/#start-planning"
+  style={{ color: "#ffffff" }}
+  className="rounded-full bg-[#203e32] px-4 py-2 text-white hover:bg-[#176f60]"
+>
+  Plan a trip ↗
+</Link>
             </nav>
           </div>
         </header>
@@ -188,11 +189,12 @@ export default function MyTripsPage() {
             </div>
 
             <Link
-              href="/#start-planning"
-              className="inline-flex min-h-11 items-center justify-center rounded-full bg-[#203e32] px-5 py-3 text-sm font-semibold text-white transition hover:bg-[#176f60]"
-            >
-              + Create a new trip
-            </Link>
+  href="/#start-planning"
+  style={{ color: "#ffffff" }}
+  className="inline-flex min-h-11 items-center justify-center rounded-full bg-[#203e32] px-5 py-3 text-sm font-semibold text-white transition hover:bg-[#176f60]"
+>
+  + Create a new trip
+</Link>
           </div>
 
           {error && (
@@ -297,12 +299,13 @@ export default function MyTripsPage() {
                       </p>
 
                       <div className="mt-6 flex gap-3">
-                        <Link
-                          href={`/trips/${trip.id}`}
-                          className="inline-flex min-h-11 flex-1 items-center justify-center rounded-full bg-[#203e32] px-4 py-3 text-sm font-semibold text-white transition hover:bg-[#176f60]"
-                        >
-                          View trip →
-                        </Link>
+                      <Link
+  href={`/trips/${trip.id}`}
+  style={{ color: "#ffffff" }}
+  className="inline-flex min-h-11 flex-1 items-center justify-center rounded-full bg-[#203e32] px-4 py-3 text-sm font-semibold text-white transition hover:bg-[#176f60]"
+>
+  View trip →
+</Link>
 
                         <button
                           type="button"
