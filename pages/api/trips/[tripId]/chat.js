@@ -1,3 +1,4 @@
+
 import { FieldValue } from "firebase-admin/firestore";
 import { getFirebaseAdmin } from "../../../../lib/firebaseAdmin";
 import { generateTripAssistantReply } from "../../../../lib/tripAssistant";
@@ -51,11 +52,16 @@ async function loadOwnedTrip(db, uid, tripId) {
   }
 
   const tripData = tripSnapshot.data();
+
   if (tripData.ownerUid !== uid) {
-    return { error: "This trip is not available for this account.", status: 403 };
+    return {
+      error: "This trip is not available for this account.",
+      status: 403,
+    };
   }
 
   const plansSnapshot = await tripRef.collection("plans").get();
+
   const plans = plansSnapshot.docs.map((planDoc) => ({
     id: planDoc.id,
     ...planDoc.data(),
@@ -90,10 +96,12 @@ export default async function handler(req, res) {
   }
 
   let admin;
+
   try {
     admin = getFirebaseAdmin();
   } catch (error) {
     console.error("Trip assistant Firebase Admin setup error:", error.message);
+
     return sendError(
       res,
       503,
@@ -102,37 +110,79 @@ export default async function handler(req, res) {
   }
 
   const decodedToken = await authenticateRequest(req, admin.auth);
+
   if (!decodedToken) {
-    return sendError(res, 401, "Please sign in again to use your trip assistant.");
+    return sendError(
+      res,
+      401,
+      "Please sign in again to use your trip assistant."
+    );
   }
 
   let ownedTrip;
+
   try {
     ownedTrip = await loadOwnedTrip(admin.db, decodedToken.uid, tripId);
   } catch (error) {
     console.error("Unable to read trip for assistant:", error);
-    return sendError(res, 500, "Your saved trip could not be loaded right now.");
+
+    return sendError(
+      res,
+      500,
+      "Your saved trip could not be loaded right now."
+    );
   }
 
   if (ownedTrip.error) {
-    return sendError(res, ownedTrip.status, ownedTrip.error);
-  }
-
-  if (req.method !== "DELETE" && ownedTrip.plans.length === 0) {
-    return sendError(res, 409, "This trip does not have saved itinerary options yet.");
-  }
-
-  if (req.method === "DELETE") {
-    try {
-      await admin.db.recursiveDelete(ownedTrip.tripRef);
-      return res.status(200).json({ success: true });
-    } catch (error) {
-      console.error("Unable to delete saved trip and conversation:", error);
-      return sendError(res, 500, "This saved trip could not be deleted right now.");
-    }
+    return sendError(ownedTrip.status, ownedTrip.error);
   }
 
   const messagesRef = ownedTrip.tripRef.collection("messages");
+
+  // Clear only conversation messages. Keep the trip and all plans intact.
+  if (req.method === "DELETE" && req.query.action === "clear-chat") {
+    try {
+      await admin.db.recursiveDelete(messagesRef);
+
+      return res.status(200).json({
+        success: true,
+        message: "Conversation cleared successfully.",
+      });
+    } catch (error) {
+      console.error("Unable to clear trip assistant conversation:", error);
+
+      return sendError(
+        res,
+        500,
+        "Your conversation could not be cleared right now."
+      );
+    }
+  }
+
+  // Preserve the existing saved-trip deletion behavior.
+  if (req.method === "DELETE") {
+    try {
+      await admin.db.recursiveDelete(ownedTrip.tripRef);
+
+      return res.status(200).json({ success: true });
+    } catch (error) {
+      console.error("Unable to delete saved trip and conversation:", error);
+
+      return sendError(
+        res,
+        500,
+        "This saved trip could not be deleted right now."
+      );
+    }
+  }
+
+  if (ownedTrip.plans.length === 0) {
+    return sendError(
+      res,
+      409,
+      "This trip does not have saved itinerary options yet."
+    );
+  }
 
   if (req.method === "GET") {
     try {
@@ -141,19 +191,26 @@ export default async function handler(req, res) {
         .limit(HISTORY_LIMIT)
         .get();
 
-      const messages = snapshot.docs
-        .reverse()
-        .map(serializeMessage);
+      const messages = snapshot.docs.reverse().map(serializeMessage);
 
-      return res.status(200).json({ success: true, messages });
+      return res.status(200).json({
+        success: true,
+        messages,
+      });
     } catch (error) {
       console.error("Unable to load trip assistant history:", error);
-      return sendError(res, 500, "Your trip conversation could not be loaded.");
+
+      return sendError(
+        res,
+        500,
+        "Your trip conversation could not be loaded."
+      );
     }
   }
 
   const userMessage =
     typeof req.body?.message === "string" ? req.body.message.trim() : "";
+
   const requestedPlanId =
     typeof req.body?.activePlanId === "string"
       ? req.body.activePlanId
@@ -245,6 +302,7 @@ export default async function handler(req, res) {
     }
 
     console.error("Trip assistant request failed:", error);
+
     return sendError(
       res,
       502,

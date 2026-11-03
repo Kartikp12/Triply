@@ -1,3 +1,4 @@
+
 import { useEffect, useRef, useState } from "react";
 import { auth } from "../lib/firebase";
 
@@ -26,11 +27,15 @@ function getTripDateLabel(tripBrief) {
   const returning = tripBrief?.dates?.returnDate;
 
   if (!departure) return "Your saved journey";
-  return `${formatDate(departure)}${returning ? ` – ${formatDate(returning)}` : ""}`;
+
+  return `${formatDate(departure)}${
+    returning ? ` – ${formatDate(returning)}` : ""
+  }`;
 }
 
 function getMessageTime(value) {
   if (!value) return "";
+
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return "";
 
@@ -52,7 +57,9 @@ export default function TripAssistant({
   const [activePlanId, setActivePlanId] = useState(initialPlanId || "");
   const [loadingHistory, setLoadingHistory] = useState(true);
   const [sending, setSending] = useState(false);
+  const [clearing, setClearing] = useState(false);
   const [error, setError] = useState("");
+
   const scrollRef = useRef(null);
   const inputRef = useRef(null);
 
@@ -69,11 +76,13 @@ export default function TripAssistant({
 
       try {
         const currentUser = auth?.currentUser;
+
         if (!currentUser) {
           throw new Error("Sign in to continue your trip conversation.");
         }
 
         const token = await currentUser.getIdToken();
+
         const response = await fetch(`/api/trips/${tripId}/chat`, {
           method: "GET",
           headers: {
@@ -82,6 +91,7 @@ export default function TripAssistant({
         });
 
         const result = await response.json().catch(() => null);
+
         if (!response.ok || !result?.success) {
           throw new Error(
             result?.error || "Your trip conversation could not be loaded."
@@ -89,11 +99,15 @@ export default function TripAssistant({
         }
 
         if (active) {
-          setMessages(Array.isArray(result.messages) ? result.messages : []);
+          setMessages(
+            Array.isArray(result.messages) ? result.messages : []
+          );
         }
       } catch (loadError) {
         if (active) {
-          setError(loadError.message || "Unable to load this conversation.");
+          setError(
+            loadError.message || "Unable to load this conversation."
+          );
         }
       } finally {
         if (active) setLoadingHistory(false);
@@ -108,17 +122,86 @@ export default function TripAssistant({
   }, [tripId]);
 
   useEffect(() => {
-    scrollRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+    scrollRef.current?.scrollIntoView({
+      behavior: "smooth",
+      block: "end",
+    });
   }, [messages, sending]);
 
   useEffect(() => {
-    const timeout = window.setTimeout(() => inputRef.current?.focus(), 180);
+    const timeout = window.setTimeout(
+      () => inputRef.current?.focus(),
+      180
+    );
+
     return () => window.clearTimeout(timeout);
   }, []);
 
+  async function handleClearChat() {
+    if (
+      loadingHistory ||
+      sending ||
+      clearing ||
+      messages.length === 0
+    ) {
+      return;
+    }
+
+    const confirmed = window.confirm(
+      "Are you sure you want to clear this conversation? This action cannot be undone."
+    );
+
+    if (!confirmed) return;
+
+    setClearing(true);
+    setError("");
+
+    try {
+      const currentUser = auth?.currentUser;
+
+      if (!currentUser) {
+        throw new Error("Sign in to clear your conversation.");
+      }
+
+      const token = await currentUser.getIdToken();
+
+      const response = await fetch(
+        `/api/trips/${tripId}/chat?action=clear-chat`,
+        {
+          method: "DELETE",
+          headers: {
+            Authorization: `Bearer ${token}`,
+          },
+        }
+      );
+
+      const result = await response.json().catch(() => null);
+
+      if (!response.ok || !result?.success) {
+        throw new Error(
+          result?.error || "Your conversation could not be cleared."
+        );
+      }
+
+      setMessages([]);
+      setDraft("");
+      setError("");
+
+      inputRef.current?.focus();
+    } catch (clearError) {
+      setError(
+        clearError.message ||
+          "Unable to clear your conversation right now."
+      );
+    } finally {
+      setClearing(false);
+    }
+  }
+
   async function handleSend(messageOverride) {
     const message = String(messageOverride ?? draft).trim();
-    if (!message || sending || loadingHistory) return;
+
+    if (!message || sending || loadingHistory || clearing) return;
 
     const optimisticMessage = {
       id: `local-${Date.now()}`,
@@ -134,11 +217,13 @@ export default function TripAssistant({
 
     try {
       const currentUser = auth?.currentUser;
+
       if (!currentUser) {
         throw new Error("Sign in to continue your trip conversation.");
       }
 
       const token = await currentUser.getIdToken();
+
       const response = await fetch(`/api/trips/${tripId}/chat`, {
         method: "POST",
         headers: {
@@ -152,21 +237,28 @@ export default function TripAssistant({
       });
 
       const result = await response.json().catch(() => null);
+
       if (!response.ok || !result?.success) {
         throw new Error(
-          result?.error || "The travel assistant could not complete that response."
+          result?.error ||
+            "The travel assistant could not complete that response."
         );
       }
 
       setMessages((current) => [
-        ...current.filter((item) => item.id !== optimisticMessage.id),
+        ...current.filter(
+          (item) => item.id !== optimisticMessage.id
+        ),
         result.userMessage || optimisticMessage,
         result.assistantMessage,
       ]);
     } catch (sendError) {
       setMessages((current) =>
-        current.filter((item) => item.id !== optimisticMessage.id)
+        current.filter(
+          (item) => item.id !== optimisticMessage.id
+        )
       );
+
       setError(
         sendError.message ||
           "Your question is ready. Check your connection and try again."
@@ -210,24 +302,42 @@ export default function TripAssistant({
               <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl bg-[#203e32] text-xl text-white">
                 ✦
               </div>
+
               <div className="min-w-0">
                 <p className="text-[10px] font-bold uppercase tracking-[0.18em] text-[#16816e]">
                   YOUR PERSONAL TRAVEL COMPANION
                 </p>
+
                 <h2 className="mt-1 truncate text-lg font-semibold tracking-tight text-[#243c30]">
                   Triply Assistant
                 </h2>
               </div>
             </div>
 
-            <button
-              type="button"
-              onClick={onClose}
-              aria-label="Close assistant"
-              className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full border border-[#e4e8df] bg-white text-xl text-[#53645a] transition hover:bg-[#f1f4ec]"
-            >
-              ×
-            </button>
+            <div className="flex shrink-0 items-center gap-2">
+              <button
+                type="button"
+                onClick={handleClearChat}
+                disabled={
+                  messages.length === 0 ||
+                  loadingHistory ||
+                  sending ||
+                  clearing
+                }
+                className="rounded-full border border-[#e4e8df] bg-white px-3.5 py-2.5 text-xs font-semibold text-[#53645a] transition hover:border-[#d7b9a9] hover:bg-[#fff8f5] hover:text-[#a34e35] disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                {clearing ? "Clearing..." : "Clear Chat"}
+              </button>
+
+              <button
+                type="button"
+                onClick={onClose}
+                aria-label="Close assistant"
+                className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full border border-[#e4e8df] bg-white text-xl text-[#53645a] transition hover:bg-[#f1f4ec]"
+              >
+                ×
+              </button>
+            </div>
           </div>
 
           <div className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-2xl bg-[#f4f6ef] px-4 py-3">
@@ -235,19 +345,25 @@ export default function TripAssistant({
               <p className="truncate text-sm font-semibold text-[#304b3b]">
                 {tripBrief?.origin || "Your journey"} → {destination}
               </p>
+
               <p className="mt-1 text-xs text-[#78857a]">
-                {getTripDateLabel(tripBrief)} · {tripBrief?.travellers?.total || ""} travellers
+                {getTripDateLabel(tripBrief)} ·{" "}
+                {tripBrief?.travellers?.total || ""} travellers
               </p>
             </div>
 
             <label className="flex items-center gap-2 text-xs font-semibold text-[#52685a]">
               <span className="sr-only">Conversation focus</span>
+
               <select
                 value={activePlanId}
-                onChange={(event) => setActivePlanId(event.target.value)}
+                onChange={(event) =>
+                  setActivePlanId(event.target.value)
+                }
                 className="max-w-[150px] rounded-full border border-[#dfe6d9] bg-white px-3 py-2 text-xs font-semibold text-[#315342] outline-none focus:border-[#16816e]"
               >
                 <option value="">All plans</option>
+
                 {plans.map((plan) => (
                   <option key={plan.id} value={plan.id}>
                     {plan.name || plan.id}
@@ -263,6 +379,7 @@ export default function TripAssistant({
             <div className="flex h-full min-h-48 items-center justify-center">
               <div className="text-center">
                 <div className="mx-auto h-9 w-9 animate-spin rounded-full border-4 border-[#dce9df] border-t-[#16816e]" />
+
                 <p className="mt-3 text-sm text-[#78857a]">
                   Opening your trip conversation...
                 </p>
@@ -275,11 +392,15 @@ export default function TripAssistant({
                   <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-[#eaf2e7] text-lg text-[#176f60]">
                     ✦
                   </div>
+
                   <h3 className="mt-4 text-xl font-semibold tracking-tight text-[#243c30]">
                     Your trip, understood.
                   </h3>
+
                   <p className="mt-2 text-sm leading-6 text-[#68766c]">
-                    I know your saved itinerary, travel dates, group, budget and all three plans. Ask me about any detail, or let me research places and stays for your journey.
+                    I know your saved itinerary, travel dates, group,
+                    budget and all three plans. Ask me about any detail,
+                    or let me research places and stays for your journey.
                   </p>
 
                   <div className="mt-5 grid gap-2">
@@ -291,7 +412,10 @@ export default function TripAssistant({
                         disabled={sending}
                         className="rounded-xl border border-[#e4e9df] bg-[#fbfcf8] px-3.5 py-3 text-left text-xs font-medium leading-5 text-[#405748] transition hover:border-[#a9c6ae] hover:bg-[#f2f7ef] disabled:opacity-60"
                       >
-                        {question} <span className="float-right text-[#16816e]">↗</span>
+                        {question}{" "}
+                        <span className="float-right text-[#16816e]">
+                          ↗
+                        </span>
                       </button>
                     ))}
                   </div>
@@ -302,11 +426,17 @@ export default function TripAssistant({
                 {messages.map((message) => (
                   <article
                     key={message.id}
-                    className={`flex ${message.role === "user" ? "justify-end" : "justify-start"}`}
+                    className={`flex ${
+                      message.role === "user"
+                        ? "justify-end"
+                        : "justify-start"
+                    }`}
                   >
                     <div
                       className={`max-w-[92%] ${
-                        message.role === "user" ? "items-end" : "items-start"
+                        message.role === "user"
+                          ? "items-end"
+                          : "items-start"
                       }`}
                     >
                       <div
@@ -321,39 +451,53 @@ export default function TripAssistant({
                         </p>
                       </div>
 
-                      {message.role === "assistant" && message.sources?.length > 0 && (
-                        <div className="mt-2.5 rounded-2xl border border-[#e5e9de] bg-white p-3.5">
-                          <p className="text-[10px] font-bold uppercase tracking-[0.15em] text-[#16816e]">
-                            Research sources
-                          </p>
-                          <div className="mt-2 space-y-2">
-                            {message.sources.map((source) => (
-                              <a
-                                key={source.reference || source.url}
-                                href={source.url}
-                                target="_blank"
-                                rel="noreferrer"
-                                className="flex items-start gap-2 text-xs leading-5 text-[#3f5d4a] transition hover:text-[#16816e]"
-                              >
-                                <span className="shrink-0 rounded-md bg-[#eaf2e7] px-1.5 py-0.5 font-bold text-[#176f60]">
-                                  [{source.reference}]
-                                </span>
-                                <span className="underline decoration-[#d2ded0] underline-offset-2">
-                                  {source.title}
-                                </span>
-                                <span aria-hidden="true" className="shrink-0">↗</span>
-                              </a>
-                            ))}
+                      {message.role === "assistant" &&
+                        message.sources?.length > 0 && (
+                          <div className="mt-2.5 rounded-2xl border border-[#e5e9de] bg-white p-3.5">
+                            <p className="text-[10px] font-bold uppercase tracking-[0.15em] text-[#16816e]">
+                              Research sources
+                            </p>
+
+                            <div className="mt-2 space-y-2">
+                              {message.sources.map((source) => (
+                                <a
+                                  key={
+                                    source.reference || source.url
+                                  }
+                                  href={source.url}
+                                  target="_blank"
+                                  rel="noreferrer"
+                                  className="flex items-start gap-2 text-xs leading-5 text-[#3f5d4a] transition hover:text-[#16816e]"
+                                >
+                                  <span className="shrink-0 rounded-md bg-[#eaf2e7] px-1.5 py-0.5 font-bold text-[#176f60]">
+                                    [{source.reference}]
+                                  </span>
+
+                                  <span className="underline decoration-[#d2ded0] underline-offset-2">
+                                    {source.title}
+                                  </span>
+
+                                  <span
+                                    aria-hidden="true"
+                                    className="shrink-0"
+                                  >
+                                    ↗
+                                  </span>
+                                </a>
+                              ))}
+                            </div>
                           </div>
-                        </div>
-                      )}
+                        )}
 
                       <p
                         className={`mt-1.5 px-1 text-[10px] text-[#9aa39a] ${
                           message.role === "user" ? "text-right" : ""
                         }`}
                       >
-                        {message.role === "user" ? "You" : "Triply Assistant"}
+                        {message.role === "user"
+                          ? "You"
+                          : "Triply Assistant"}
+
                         {message.createdAt
                           ? ` · ${getMessageTime(message.createdAt)}`
                           : ""}
@@ -371,12 +515,14 @@ export default function TripAssistant({
                           <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-[#16816e] [animation-delay:-0.1s]" />
                           <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-[#16816e]" />
                         </span>
+
                         Checking your trip details...
                       </div>
                     </div>
                   </div>
                 )}
               </div>
+
               <div ref={scrollRef} />
             </>
           )}
@@ -413,9 +559,12 @@ export default function TripAssistant({
               <p className="text-[10px] text-[#9aa39a]">
                 Trip context · Live research when needed
               </p>
+
               <button
                 type="submit"
-                disabled={!draft.trim() || sending || loadingHistory}
+                disabled={
+                  !draft.trim() || sending || loadingHistory
+                }
                 className="inline-flex min-h-10 items-center justify-center gap-2 rounded-full bg-[#203e32] px-5 py-2 text-xs font-bold text-white transition hover:bg-[#176f60] disabled:cursor-not-allowed disabled:opacity-45"
               >
                 {sending ? "Thinking..." : "Send"}
@@ -423,8 +572,10 @@ export default function TripAssistant({
               </button>
             </div>
           </form>
+
           <p className="mt-2 text-center text-[10px] text-[#a0a89f]">
-            Travel details and estimates are checked against available sources before being presented.
+            Travel details and estimates are checked against available
+            sources before being presented.
           </p>
         </footer>
       </section>
