@@ -382,24 +382,30 @@ export default function TripPlannerForm({ onPlansGenerated }) {
         });
 
         // Generate the overview for each plan.
-        const overviewResults = await Promise.all(
-          planIds.map(async (planId) => {
-            const result = await requestChunkGeneration({
-              mode: "overview",
-              trip: tripBrief,
-              planId,
-            });
+// Generate plan overviews one at a time.
+// This avoids sending three heavy AI requests simultaneously.
+const overviewResults = [];
 
+for (const planId of planIds) {
+  setNotice({
+    type: "loading",
+    message: `Preparing ${planId.replaceAll("-", " ")}...`,
+  });
 
-            if (!result.plan || result.plan.id !== planId) {
-              throw new Error(
-                `Triply did not return a valid overview for ${planId}.`
-              );
-            }
+  const result = await requestChunkGeneration({
+    mode: "overview",
+    trip: tripBrief,
+    planId,
+  });
 
-            return result.plan;
-          })
-        );
+  if (!result.plan || result.plan.id !== planId) {
+    throw new Error(
+      `Triply did not return a valid overview for ${planId}.`
+    );
+  }
+
+  overviewResults.push(result.plan);
+}
 
         const daysByPlan = Object.fromEntries(
           planIds.map((planId) => [planId, []])
@@ -424,36 +430,36 @@ export default function TripPlannerForm({ onPlansGenerated }) {
               `of ${durationDays} for all three plans...`,
           });
 
-          const chunkResults = await Promise.all(
-            overviewResults.map(async (overview) => {
-              const result = await requestChunkGeneration({
-                mode: "days",
-                trip: tripBrief,
-                planId: overview.id,
-                startDay,
-                endDay,
-                overview,
-              
-                // Send all previously completed days for this plan.
-                previousDays: daysByPlan[overview.id],
-              });
+          const chunkResults = [];
 
-              if (
-                result.planId !== overview.id ||
-                !Array.isArray(result.days) ||
-                result.days.length !== endDay - startDay + 1
-              ) {
-                throw new Error(
-                  `Triply returned incomplete itinerary days ${startDay}–${endDay}.`
-                );
-              }
-
-              return {
-                planId: overview.id,
-                days: result.days,
-              };
-            })
-          );
+          for (const overview of overviewResults) {
+            const result = await requestChunkGeneration({
+              mode: "days",
+              trip: tripBrief,
+              planId: overview.id,
+              startDay,
+              endDay,
+              overview,
+          
+              // Send all previously completed days for this plan.
+              previousDays: daysByPlan[overview.id],
+            });
+          
+            if (
+              result.planId !== overview.id ||
+              !Array.isArray(result.days) ||
+              result.days.length !== endDay - startDay + 1
+            ) {
+              throw new Error(
+                `Triply returned incomplete itinerary days ${startDay}–${endDay}.`
+              );
+            }
+          
+            chunkResults.push({
+              planId: overview.id,
+              days: result.days,
+            });
+          }
 
           for (const chunk of chunkResults) {
             daysByPlan[chunk.planId].push(...chunk.days);

@@ -413,7 +413,7 @@ async function callCloudflareAI(trip, prompt, maxTokens = 2500) {
       temperature: 0.1,
     }),
 
-    signal: AbortSignal.timeout(75000),
+    signal: AbortSignal.timeout(120000),
   });
 
   let data;
